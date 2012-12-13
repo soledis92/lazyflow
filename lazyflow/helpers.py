@@ -218,7 +218,16 @@ class newIterator:
         retSlice = [(self.toSlice(src,True),self.toSlice(trgt,True),self.toSlice(mask)) \
                     for src,trgt,mask in retRoi]
         return retSlice.__iter__()
- 
+    
+    def getIterspace(self):
+        trgtRois = self.getSubRois(self.roi[0], self.trgtGrid, self.roi)
+        srcRoi = self.mapRoiToSource(self.roi)
+        retRoi = [(self.translateRoi(self.mapRoiToSource(roi),srcRoi[0]),\
+                 self.translateRoi(roi,self.roi[0]),self.getMask(roi,self.trgtGrid))\
+                for roi in trgtRois]
+        retSlice = [(self.toSlice(src,True),self.toSlice(trgt,True),self.toSlice(mask)) \
+                    for src,trgt,mask in retRoi]
+        return tuple(retSlice)
 if __name__ == "__main__":
     
     class roi:

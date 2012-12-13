@@ -81,8 +81,6 @@ class TestOpBaseVigraFilter(unittest.TestCase):
             for i in range(10):
                 start = [numpy.random.randint(0,max-1) for i in range(len(dim))]
                 stop = [numpy.random.randint(start[i]+1,max) for i in range(len(dim))]
-                start = list((0,)*len(dim))
-                stop = list((max,)*(len(dim)-1)+(3,))
                 #adjust rois for structureTensoreEigenvalues
                 if Filter.func.__name__ == "structureTensorEigenvaluesSummedChannels":
                     start[-1] = numpy.random.randint(0,testArray.axistags.axisTypeCount(vigra.AxisType.Space)-1)

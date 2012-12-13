@@ -3,6 +3,7 @@ from lazyflow.helpers import newIterator
 from lazyflow.operators.obsolete.generic import OpMultiArrayStacker
 from lazyflow.operators.obsolete.vigraOperators import Op50ToMulti
 from lazyflow.rtype import SubRegion
+from lazyflow.request import Pool
 import numpy
 import vigra
 from math import sqrt
@@ -10,6 +11,7 @@ from functools import partial
 from lazyflow.roi import roiToSlice,sliceToRoi
 import collections
 import warnings
+from multiprocessing import Process,Array,Pool
 
 class OpBaseVigraFilter(Operator):
     
@@ -110,10 +112,34 @@ class OpBaseVigraFilter(Operator):
         
         #iterate over the requested volumes
         
-        warnings.warn("FIXME: This loop could be parallelized for better performance.")
-        for src,trgt,mask in nIt:
+#        warnings.warn("FIXME: This loop could be parallelized for better performance.")
+#        for src,trgt,mask in nIt:
+#            result[trgt] = self.vigraFilter(source = source[src],window_size=self.windowSize,roi=origRoi)[mask]
+#        return result
+        
+        pool = Pool()
+        def writeInResult(src,trgt,mask):
             result[trgt] = self.vigraFilter(source = source[src],window_size=self.windowSize,roi=origRoi)[mask]
+        iterSpace = nIt.getIterspace()
+        iterSpace = iterSpace[0]
+        #pool.map(writeInResult,iterSpace)
         return result
+        
+        
+    
+        #open a request pool to parallelize vigra filter requests. 
+#        reqPool = Pool()
+#        for src,trgt,mask in nIt:
+#            def writeInResult(src,trgt,mask,roi):
+#                result[trgt] = self.vigraFilter(source = source[src],window_size=self.windowSize,roi=roi)[mask]
+#            reqPool.add(reqPool.request(writeInResult,src=src,trgt=trgt,mask=mask,roi=origRoi))
+#        reqPool.wait()
+#        reqPool.clean()
+#        return result
+    
+        
+    
+        
     
 class OpGaussianSmoothing(OpBaseVigraFilter):
     inputSlots = [InputSlot("Input"),InputSlot("Sigma")]
@@ -629,12 +655,7 @@ if __name__ == "__main__":
     
     g = Graph()
     v = vigra.VigraArray(1000*numpy.random.rand(10,10,4),axistags = vigra.defaultAxistags('xyc'))
-    op = OpPixelFeaturesPresmoothed(graph = g)
-    op.FeatureIds.setValue(["GaussianSmoothing","StructureTensorEigenvalues"])
-    op.Scales.setValue([1.5,2.0])
+    op = OpGaussianSmoothing(graph=g)
     op.Input.setValue(v)
-    n = numpy.ndarray((2,2))
-    n[:] = [[1,1],[1,1]] 
-    op.Matrix.setValue(n)
-    w = op.Output([0,0,9],[10,10,10]).wait()
-    f = op.Features[2]([0,0,1],[10,10,2]).wait()
+    op.Sigma.setValue(2.0)
+    r=op.Output().wait()
