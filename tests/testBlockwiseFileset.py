@@ -9,7 +9,8 @@ from lazyflow.roi import sliceToRoi, getIntersectingBlocks
 
 import logging
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler(sys.stdout))
+#logger.addHandler(logging.StreamHandler(sys.stdout))
+logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
 
 logger.setLevel(logging.INFO)
 #logger.setLevel(logging.DEBUG)
@@ -46,6 +47,9 @@ class TestBlockwiseFileset(object):
         
     @classmethod
     def teardownClass(cls):
+        if not cls.bfs._closed:
+            cls.bfs.close()
+        assert not cls.bfs.purgeAllLocks(), "Some lockfiles were left lingering."
         shutil.rmtree(cls.tempDir)
 
     def test_1_BasicWrite(self):
@@ -61,8 +65,7 @@ class TestBlockwiseFileset(object):
         allBlockStarts = getIntersectingBlocks( self.bfs.description.block_shape, totalRoi )
         for blockStart in allBlockStarts:
             self.bfs.setBlockStatus(blockStart, BlockwiseFileset.BLOCK_AVAILABLE)
-        
-    
+
     def test_2_ReadAll(self):
         logger.debug( "Reading data..." )
         read_data = numpy.zeros( tuple(self.dataShape), dtype=numpy.uint8 )
@@ -113,9 +116,13 @@ class TestBlockwiseFileset(object):
             random_data = numpy.random.random( roiShape )
             self.bfs.writeData( roi, random_data )
 
-    def test_6_TestView(self):
+    def test_6_CloseBfs(self):
+        self.bfs.close()
+
+    def test_7_TestView(self):
         """
-        Load some of the dataset again; this time with an offset view
+        Load some of the dataset again; this time with an offset view.
+        Note: The original blockwise fileset must be closed before this test starts.
         """
         # Create a copy of the original description, but specify a translated (and smaller) view
         desc = BlockwiseFileset.readDescription(self.configpath)
@@ -126,23 +133,27 @@ class TestBlockwiseFileset(object):
         
         # Open the fileset using the special description file
         bfs = BlockwiseFileset( offsetConfigPath, 'r' )
-        assert (bfs.description.view_origin == desc.view_origin).all()
-        assert (bfs.description.view_shape == desc.view_shape).all()
+        try:
+            assert (bfs.description.view_origin == desc.view_origin).all()
+            assert (bfs.description.view_shape == desc.view_shape).all()
+            
+            # Read some data
+            logger.debug( "Reading data..." )
+            disk_slicing = numpy.s_[:, 300:350, 200:250, 100:150, :]
+            view_slicing = numpy.s_[:, 0:50, 0:50, 0:50, :]
+            roi = sliceToRoi( view_slicing, self.dataShape )
+            roiShape = roi[1] - roi[0]
+            read_data = numpy.zeros( tuple(roiShape), dtype=numpy.uint8 )
+            
+            bfs.readData( roi, read_data )
+            
+            # The data we read should match the correct part of the original dataset.
+            logger.debug( "Checking data..." )
+            assert self.data[disk_slicing].shape == read_data.shape
+            assert (self.data[disk_slicing] == read_data).all(), "Data didn't match."
         
-        # Read some data
-        logger.debug( "Reading data..." )
-        disk_slicing = numpy.s_[:, 300:350, 200:250, 100:150, :]
-        view_slicing = numpy.s_[:, 0:50, 0:50, 0:50, :]
-        roi = sliceToRoi( view_slicing, self.dataShape )
-        roiShape = roi[1] - roi[0]
-        read_data = numpy.zeros( tuple(roiShape), dtype=numpy.uint8 )
-        
-        bfs.readData( roi, read_data )
-        
-        # The data we read should match the correct part of the original dataset.
-        logger.debug( "Checking data..." )
-        assert self.data[disk_slicing].shape == read_data.shape
-        assert (self.data[disk_slicing] == read_data).all(), "Data didn't match."
+        finally:
+            bfs.close()
 
 if __name__ == "__main__":
     import sys

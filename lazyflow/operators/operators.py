@@ -162,8 +162,8 @@ class OpMultiMultiArrayPiper(Operator):
 
 try:
     from  lazyflow.drtile import drtile
-except:
-    raise RuntimeError("Error importing drtile, please use cmake to compile lazyflow.drtile !")
+except Exception, e:
+    raise RuntimeError("Error importing drtile, please use cmake to compile lazyflow.drtile !\n" + str(e))
 
 class BlockQueue(object):
     __slots__ = ["queue","lock"]
@@ -359,7 +359,8 @@ class OpArrayCache(OpArrayPiper):
             self._fixed = False
             self._cache = None
             self._lock = Lock()
-            self._cacheLock = request.Lock()#greencall.Lock()
+            #self._cacheLock = request.Lock()#greencall.Lock()
+            self._cacheLock = Lock()
             self._lazyAlloc = True
             self._cacheHits = 0
             self.graph._registerCache(self)
@@ -736,18 +737,18 @@ if has_blist:
                 self._oldShape = shape
                 self.outputs["Output"].meta.dtype = numpy.uint8
                 self.outputs["Output"].meta.shape = shape
-                self.outputs["Output"].meta.axistags = vigra.defaultAxistags(len(shape))
+                
+                # FIXME: Don't give arbitrary axistags.  Specify them correctly if you need them.
+                #self.outputs["Output"].meta.axistags = vigra.defaultAxistags(len(shape))
 
                 self.inputs["Input"].meta.shape = shape
 
 
                 self.outputs["nonzeroValues"].meta.dtype = object
                 self.outputs["nonzeroValues"].meta.shape = (1,)
-                self.outputs["nonzeroValues"].meta.axistags = vigra.defaultAxistags(1)
 
                 self.outputs["nonzeroCoordinates"].meta.dtype = object
                 self.outputs["nonzeroCoordinates"].meta.shape = (1,)
-                self.outputs["nonzeroCoordinates"].meta.axistags = vigra.defaultAxistags(1)
 
                 self._denseArray = numpy.zeros(shape, numpy.uint8)
                 self._sparseNZ =  blist.sorteddict()
@@ -961,15 +962,12 @@ if has_blist:
     
                     self.outputs["nonzeroValues"].meta.dtype = object
                     self.outputs["nonzeroValues"].meta.shape = (1,)
-                    self.outputs["nonzeroValues"].meta.axistags = vigra.defaultAxistags(1)
     
                     self.outputs["nonzeroCoordinates"].meta.dtype = object
                     self.outputs["nonzeroCoordinates"].meta.shape = (1,)
-                    self.outputs["nonzeroCoordinates"].meta.axistags = vigra.defaultAxistags(1)
     
                     self.outputs["nonzeroBlocks"].meta.dtype = object
                     self.outputs["nonzeroBlocks"].meta.shape = (1,)
-                    self.outputs["nonzeroBlocks"].meta.axistags = vigra.defaultAxistags(1)
     
                     self.outputs["maxLabel"].setValue(self._maxLabel)
     
@@ -1015,6 +1013,11 @@ if has_blist:
                 if self.inputs["deleteLabel"].ready():
                     for l in self._labelers.values():
                         l.inputs["deleteLabel"].setValue(self.inputs['deleteLabel'].value)
+                        
+                        # Our internal labelers will mark their outputs as dirty,
+                        # But we aren't hooked up to forward those dirty notifications to our outputs.
+                        # Instead, we'll just mark our whole output dirty right now.
+                        self.Output.setDirty(slice(None))
 
         def execute(self, slot, subindex, roi, result):
             key = roi.toSlice()
@@ -1403,6 +1406,7 @@ class OpSlicedBlockedArrayCache(Operator):
         with Tracer(self.traceLogger):
             super(OpSlicedBlockedArrayCache, self).__init__(*args, **kwargs)
             self._innerOps = []
+            self._somethingIsDirty = False
 
     def setupOutputs(self):
         self.shape = self.inputs["Input"].meta.shape
@@ -1437,7 +1441,7 @@ class OpSlicedBlockedArrayCache(Operator):
         self.InnerOutputs.resize( len(self._innerOps) )
         for i, slot in enumerate(self.InnerOutputs):
             slot.connect(self._innerOps[i].Output)
-
+        
     def execute(self, slot, subindex, roi, result):
         assert slot == self.Output
         
@@ -1475,10 +1479,15 @@ class OpSlicedBlockedArrayCache(Operator):
             elif slot == self.outerBlockShape or slot == self.innerBlockShape:
                 self.Output.setDirty( slice(None) )
             elif slot == self.fixAtCurrent:
-                self.Output.setDirty( slice(None) )
+                # Special case: If *nothing* has become dirty since we became 'fixed',
+                #  then there's no reason to send out a big dirty notification.
+                if self._somethingIsDirty:
+                    self.Output.setDirty( slice(None) )
+                    self._somethingIsDirty = False
             else:
                 assert False, "Unknown dirty input slot"
-
+        elif slot != self.fixAtCurrent:
+            self._somethingIsDirty = True
 
 
 

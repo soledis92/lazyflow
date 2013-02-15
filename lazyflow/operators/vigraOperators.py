@@ -428,7 +428,8 @@ class OpPixelFeaturesPresmoothed(Operator):
             req = self.inputs["Input"][treadKey].allocate()
 
             sourceArray = req.wait()
-            req.result = None
+            req.clean()
+            #req.result = None
             req.destination = None
             if sourceArray.dtype != numpy.float32:
                 sourceArrayF = sourceArray.astype(numpy.float32)
@@ -862,7 +863,8 @@ class OpPixelFeaturesInterpPresmoothed(Operator):
             req = self.inputs["Input"][treadKey].allocate()
             sourceArray = req.wait()
             
-            req.result = None
+            #req.result = None
+            req.clean()
             req.destination = None
             if sourceArray.dtype != numpy.float32:
                 sourceArrayF = sourceArray.astype(numpy.float32)
@@ -1616,6 +1618,8 @@ class OpH5WriterBigDataset(Operator):
             s=activeSlicings.popleft()
             data = req.wait()
             self.d[s]=data
+            
+            req.clean() # Discard the data in the request and allow its children to be garbage collected.
 
             if len(slicings) > 0:
                 # Create a new active request

@@ -1,9 +1,12 @@
+import gc
 import sys
 import numpy
+import psutil
 import threading
-from lazyflow.graph import Graph
-from lazyflow.roi import getIntersectingBlocks, getBlockBounds, roiToSlice
+from lazyflow.graph import Graph, Operator, OutputSlot
+from lazyflow.roi import roiToSlice
 from lazyflow.operators import OpArrayPiper
+from lazyflow.request import Request
 
 from lazyflow.utility import BigRequestStreamer
 
@@ -15,7 +18,7 @@ logger.setLevel(logging.INFO)
 #logger.setLevel(logging.DEBUG)
 
 class TestBigRequestStreamer(object):
-    
+
     def testBasic(self):
         op = OpArrayPiper( graph=Graph() )
         inputData = numpy.indices( (100,100) ).sum(0)
@@ -55,6 +58,79 @@ class TestBigRequestStreamer(object):
         assert len(progressList) >= 10
         
         logger.debug( "FINISHED" )
+
+    def testForMemoryLeaks(self):
+        """
+        If the BigRequestStreamer doesn't clean requests as they complete, they'll take up too much memory.
+        """
+        
+        class OpNonsense( Operator ):
+            """
+            Provide nonsense data of the correct shape for each request.
+            """
+            Output = OutputSlot()
+
+            def setupOutputs(self):
+                self.Output.meta.dtype = numpy.float32
+                self.Output.shape = (2000, 2000, 2000)
+    
+            def execute(self, slot, subindex, roi, result):
+                """
+                Simulate a cascade of requests, to make sure that the entire cascade is properly freed.
+                """
+                roiShape = roi.stop - roi.start
+                def getResults1():
+                    return numpy.indices(roiShape, self.Output.meta.dtype).sum()
+                def getResults2():
+                    req = Request( getResults1 )
+                    req.submit()
+                    result[:] = req.wait()
+                    return result
+
+                req = Request( getResults2 )
+                req.submit()
+                result[:] = req.wait()
+                return result
+        
+            def propagateDirty(self, slot, subindex, roi):
+                pass
+
+        gc.collect()
+
+        vmem = psutil.virtual_memory()
+        start_mem_usage_mb = (vmem.total - vmem.available) / (1000*1000)
+        logger.debug( "Starting test with memory usage at: {} MB".format( start_mem_usage_mb ) )
+
+        op = OpNonsense( graph=Graph() )
+        def handleResult( roi, result ):
+            pass
+
+        def handleProgress( progress ):
+            #gc.collect()
+            logger.debug( "Progress update: {}".format( progress ) )
+            #vmem = psutil.virtual_memory()
+            #finished_mem_usage_mb = (vmem.total - vmem.available) / (1000*1000)
+            #difference_mb = finished_mem_usage_mb - start_mem_usage_mb
+            #logger.debug( "Progress update: {} with memory usage at: {} MB ({} MB increase)".format( progress, finished_mem_usage_mb, difference_mb ) )
+
+        batch = BigRequestStreamer(op.Output, [(0,0,0), (100,1000,1000)], (100,100,100) )
+        batch.resultSignal.subscribe( handleResult )
+        batch.progressSignal.subscribe( handleProgress )
+        batch.execute()
+
+        vmem = psutil.virtual_memory()
+        finished_mem_usage_mb = (vmem.total - vmem.available) / (1000*1000)
+        difference_mb = finished_mem_usage_mb - start_mem_usage_mb
+        logger.debug( "Finished execution with memory usage at: {} MB ({} MB increase)".format( finished_mem_usage_mb, difference_mb ) )
+
+        # Collect
+        gc.collect()
+
+        vmem = psutil.virtual_memory()
+        finished_mem_usage_mb = (vmem.total - vmem.available) / (1000*1000)
+        difference_mb = finished_mem_usage_mb - start_mem_usage_mb
+        logger.debug( "Finished test with memory usage at: {} MB ({} MB increase)".format( finished_mem_usage_mb, difference_mb ) )
+        assert difference_mb < 200, "BigRequestStreamer seems to have memory leaks.  After executing, RAM usage increased by {}".format( difference_mb )
 
 if __name__ == "__main__":
     import sys

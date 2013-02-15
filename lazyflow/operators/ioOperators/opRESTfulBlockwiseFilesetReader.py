@@ -1,3 +1,4 @@
+import os
 import vigra
 from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.utility.io.RESTfulBlockwiseFileset import RESTfulBlockwiseFileset
@@ -14,11 +15,17 @@ class OpRESTfulBlockwiseFilesetReader(Operator):
     DescriptionFilePath = InputSlot(stype='filestring')
     Output = OutputSlot()
 
+    class MissingDatasetError(Exception):
+        pass
+
     def __init__(self, *args, **kwargs):
         super(OpRESTfulBlockwiseFilesetReader, self).__init__(*args, **kwargs)
         self._blockwiseFileset = None
 
     def setupOutputs(self):
+        if not os.path.exists(self.DescriptionFilePath.value):
+            raise OpRESTfulBlockwiseFilesetReader.MissingDatasetError("Dataset description not found: {}".format( self.DescriptionFilePath.value ) )
+        
         # Load up the class that does the real work
         self._blockwiseFileset = RESTfulBlockwiseFileset( self.DescriptionFilePath.value )
 
@@ -39,4 +46,10 @@ class OpRESTfulBlockwiseFilesetReader(Operator):
     def propagateDirty(self, slot, subindex, roi):
         assert slot == self.DescriptionFilePath, "Unknown input slot."
         self.Output.setDirty( slice(None) )
+        
+    def cleanUp(self):
+        import sys
+        if self._blockwiseFileset is not None:
+            self._blockwiseFileset.close()
+        super(OpRESTfulBlockwiseFilesetReader, self).cleanUp()
 

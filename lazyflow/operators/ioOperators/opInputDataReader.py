@@ -17,7 +17,7 @@ class OpInputDataReader(Operator):
     name = "OpInputDataReader"
     category = "Input"
 
-    h5Exts = ['h5', 'hdf5']
+    h5Exts = ['h5', 'hdf5', 'ilp']
     npyExts = ['npy']
     blockwiseExts = ['json']
     vigraImpexExts = vigra.impex.listExtensions().split()
@@ -32,6 +32,9 @@ class OpInputDataReader(Operator):
     DefaultAxisOrder = InputSlot(stype="string", value='txyzc')
     FilePath = InputSlot(stype='filestring')
     Output = OutputSlot()
+
+    class DatasetReadError(Exception):
+        pass
 
     def __init__(self, *args, **kwargs):
         super(OpInputDataReader, self).__init__(*args, **kwargs)
@@ -61,7 +64,7 @@ class OpInputDataReader(Operator):
                 return
             else:
                 # Convert this relative path into an absolute path
-                filePath = os.path.normpath(os.path.join(self.WorkingDirectory.value, filePath))
+                filePath = os.path.normpath(os.path.join(self.WorkingDirectory.value, filePath)).replace('\\','/')
 
         # Clean up before reconfiguring
         if self.internalOperator is not None:
@@ -82,7 +85,10 @@ class OpInputDataReader(Operator):
         # Try every method of opening the file until one works.
         iterFunc = openFuncs.__iter__()
         while self.internalOperator is None:
-            openFunc = iterFunc.next()
+            try:
+                openFunc = iterFunc.next()
+            except StopIteration:
+                break
             self.internalOperator, self.internalOutput = openFunc(filePath)
 
         if self.internalOutput is None:
@@ -115,10 +121,16 @@ class OpInputDataReader(Operator):
         internalPath = filePath.split(ext)[1]
 
         if not os.path.exists(externalPath):
-            raise RuntimeError("Input file does not exist: " + externalPath)
+            raise OpInputDataReader.DatasetReadError("Input file does not exist: " + externalPath)
 
         # Open the h5 file in read-only mode
-        h5File = h5py.File(externalPath, 'r')
+        try:
+            h5File = h5py.File(externalPath, 'r')
+        except Exception as e:
+            msg = "Unable to open HDF5 File: {}".format( externalPath )
+            if hasattr(e, 'message'):
+                msg += e.message
+            raise OpInputDataReader.DatasetReadError( msg )
         self._file = h5File
 
         h5Reader = OpStreamingHdf5Reader(parent=self, graph=self.graph)
@@ -127,7 +139,13 @@ class OpInputDataReader(Operator):
 
         # Can't set the internal path yet if we don't have one
         assert internalPath != '', "When using hdf5, you must append the hdf5 internal path to the data set to your filename, e.g. myfile.h5/volume/data"
-        h5Reader.InternalPath.setValue(internalPath)
+
+        try:
+            h5Reader.InternalPath.setValue(internalPath)
+        except OpStreamingHdf5Reader.DatasetReadError as e:
+            msg = "Error reading HDF5 File: {}".format(externalPath)
+            msg += e.msg
+            raise OpInputDataReader.DatasetReadError( msg )
 
         return (h5Reader, h5Reader.OutputImage)
 
@@ -139,11 +157,14 @@ class OpInputDataReader(Operator):
         if fileExtension not in OpInputDataReader.npyExts:
             return (None, None)
         else:
-            # Create an internal operator
-            npyReader = OpNpyFileReader(parent=self, graph=self.graph)
-            npyReader.AxisOrder.connect( self.DefaultAxisOrder )
-            npyReader.FileName.setValue(filePath)
-            return (npyReader, npyReader.Output)
+            try:
+                # Create an internal operator
+                npyReader = OpNpyFileReader(parent=self, graph=self.graph)
+                npyReader.AxisOrder.connect( self.DefaultAxisOrder )
+                npyReader.FileName.setValue(filePath)
+                return (npyReader, npyReader.Output)
+            except OpNpyFileReader.DatasetReadError as e:
+                raise OpInputDataReader.DatasetReadError( *e.args )
 
     def _attemptOpenAsBlockwiseFileset(self, filePath):
         fileExtension = os.path.splitext(filePath)[1].lower()
@@ -157,6 +178,8 @@ class OpInputDataReader(Operator):
                 return (opReader, opReader.Output)
             except JsonConfigParser.SchemaError:
                 opReader.cleanUp()
+            except OpBlockwiseFilesetReader.MissingDatasetError as e:
+                raise OpInputDataReader.DatasetReadError(*e.args)
         return (None, None)
 
     def _attemptOpenAsRESTfulBlockwiseFileset(self, filePath):
@@ -171,6 +194,8 @@ class OpInputDataReader(Operator):
                 return (opReader, opReader.Output)
             except JsonConfigParser.SchemaError:
                 opReader.cleanUp()
+            except OpRESTfulBlockwiseFilesetReader.MissingDatasetError as e:
+                raise OpInputDataReader.DatasetReadError(*e.args)
         return (None, None)
 
     def _attemptOpenWithVigraImpex(self, filePath):
@@ -210,7 +235,30 @@ class OpInputDataReader(Operator):
         # Output slots are directly conncted to internal operators
         pass
 
+    @classmethod
+    def getInternalDatasets(cls, filePath):
+        """
+        Search the given file for internal datasets, and return their internal paths as a list.
+        For now, it is assumed that the file is an hdf5 file.
+        
+        Returns: A list of the internal datasets in the file, or None if the format doesn't support internal datasets.
+        """
+        datasetNames = None
+        ext = os.path.splitext(filePath)[1][1:]
+        
+        # HDF5. Other formats don't contain more than one dataset (as far as we're concerned).
+        if ext in OpInputDataReader.h5Exts:
+            datasetNames = []
+            # Open the file as a read-only so we can get a list of the internal paths
+            with h5py.File(filePath, 'r') as f:
+                # Define a closure to collect all of the dataset names in the file.
+                def accumulateDatasetPaths(name, val):
+                    if type(val) == h5py._hl.dataset.Dataset and 3 <= len(val.shape) <= 5:
+                        datasetNames.append( '/' + name )    
+                # Visit every group/dataset in the file            
+                f.visititems(accumulateDatasetPaths)        
 
+        return datasetNames
 
 
 
