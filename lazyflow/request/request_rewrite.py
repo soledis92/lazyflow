@@ -195,6 +195,7 @@ class Request( object ):
         if not self.cancelled:
             try:
                 # Do the actual work
+                self.fn()
                 self._result = self.fn()
             except Request.CancellationException:
                 # Don't propagate cancellations back to the worker thread,
@@ -290,6 +291,7 @@ class Request( object ):
                         then a Request.TimeoutException is raised.
         """        
         assert not self._cleaned, "Can't wait() for a request that has already been cleaned."
+        print 'LOL'
         return self._wait(timeout)
 
     def block(self, timeout=None):

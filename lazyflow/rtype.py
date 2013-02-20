@@ -151,7 +151,13 @@ class SubRegion(Roi):
         self.start.insert(0,start)
         self.stop.insert(0,stop)
         return self
-        
+    
+    def shiftToOrigin(self,cIndex):
+        start = [0 for i in range(len(self.start)) if i != cIndex]
+        stop = [self.stop[i]-self.start[i] for i in range(len(self.start)) if i != cIndex]
+        self.start = TinyVector(start)
+        self.stop = TinyVector(stop)
+        return self
 
     def expandByShape(self,shape,cIndex,tIndex):
         """
