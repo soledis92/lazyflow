@@ -64,9 +64,6 @@ class OpBaseVigraFilter(Operator):
             retRoi.stop[cIndex] *= self.channelsPerChannel()
             self.Output.setDirty(retRoi)
     
-    def setupIterator(self, source, result):
-        self.iterator = AxisIterator(source, 'spatialc', result, 'spatialc', [(), (1, 1, 1, 1, self.resultingChannels())])
-    
     def setupOutputs(self):
         inputSlot = self.Input
         outputSlot = self.Output
@@ -128,9 +125,6 @@ class OpGaussianSmoothing(OpBaseVigraFilter):
     def __init__(self, *args, **kwargs):
         super(OpGaussianSmoothing, self).__init__(*args, **kwargs)
         
-    def setupIterator(self, source, result):
-        self.iterator = AxisIterator(source, 'spatialc', result, 'spatialc', [(), ({'c':self.channelsPerChannel()})])   
-    
     def setupFilter(self):
         sigma = self.inputs["Sigma"].value
         def tmpFilter(source, sigma, window_size, roi):
@@ -177,9 +171,6 @@ class OpHessianOfGaussian(OpBaseVigraFilter):
     def __init__(self, *args, **kwargs):
         super(OpHessianOfGaussian, self).__init__(*args, **kwargs)
         
-    def setupIterator(self, source, result):
-        self.iterator = AxisIterator(source, 'spatial', result, 'spatial', [(), ({'c':self.resultingChannels()})])   
-    
     def setupFilter(self):
         sigma = self.inputs["Sigma"].value
         
@@ -246,9 +237,6 @@ class OpStructureTensorEigenvaluesSummedChannels(OpBaseVigraFilter):
 
         return max(innerScale, outerScale)
     
-    def setupIterator(self, source, result):
-        self.iterator = AxisIterator(source, 'spatial', result, 'spatial', [(), ({'c':self.channelsPerChannel()})])   
-        
     def resultingChannels(self):
         return self.Input.meta.axistags.axisTypeCount(vigra.AxisType.Space)
     
@@ -279,9 +267,6 @@ class OpStructureTensorEigenvalues(OpBaseVigraFilter):
 
         return max(innerScale, outerScale)
     
-    def setupIterator(self, source, result):
-        self.iterator = AxisIterator(source, 'spatial', result, 'spatial', [(), ({'c':self.channelsPerChannel()})])   
-        
     def resultingChannels(self):
         return self.Input.meta.axistags.axisTypeCount(vigra.AxisType.Space) * self.Input.meta.shape[self.Input.meta.axistags.channelIndex]
     
@@ -304,12 +289,8 @@ class OpHessianOfGaussianEigenvalues(OpBaseVigraFilter):
             return tmpfilter(source, scale=scale, window_size=window_size, roi=(roi.start, roi.stop))
 
         self.vigraFilter = partial(tmpFilter, scale=scale)
-        
         return scale
     
-    def setupIterator(self, source, result):
-        self.iterator = AxisIterator(source, 'spatial', result, 'spatial', [(), ({'c':self.channelsPerChannel()})])   
-  
     def resultingChannels(self):
         return self.Input.meta.axistags.axisTypeCount(vigra.AxisType.Space) * self.Input.meta.shape[self.Input.meta.axistags.channelIndex]
     
