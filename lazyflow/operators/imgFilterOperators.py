@@ -6,10 +6,12 @@ import numpy
 import vigra
 from math import sqrt
 from functools import partial
-from lazyflow.roi import roiToSlice, sliceToRoi
 import collections
 import warnings
 import inspect
+
+
+warnings.warn('This functionality requires the old request implementation')
 
 class OpBaseVigraFilter(Operator):
     
@@ -549,21 +551,3 @@ class OpPixelFeaturesPresmoothed(Operator):
             self.Output.setDirty(slice(None))
         else:
             assert False, "Unknown dirty input slot."
-        pass
-
-if __name__ == "__main__":
-    from lazyflow.graph import Graph
-    from volumina.viewer import Viewer
-    from PyQt4.QtGui import QMainWindow, QApplication
-    import sys, vigra
-    g = Graph()
-    v = vigra.VigraArray(1000 * numpy.random.rand(100, 100, 3), axistags=vigra.defaultAxistags('xyc'))
-    op = OpPixelFeaturesPresmoothed(graph=g)
-    op.FeatureIds.setValue(["StructureTensorEigenvalues", "HessianOfGaussianEigenvalues"])
-    op.Scales.setValue([1.5, 2.0])
-    op.Input.setValue(v)
-    n = numpy.ndarray((2, 2))
-    n[:] = [[1, 0], [0, 1]] 
-    op.Matrix.setValue(n)
-    w = op.Output().wait()
-    print w.shape

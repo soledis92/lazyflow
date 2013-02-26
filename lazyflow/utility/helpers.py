@@ -107,21 +107,30 @@ def generateRandomRoi(maxShape,minShape = 0,minWidth = 0):
     return roi
 
 
-
 class AxisIterator:
+    """
+    iterator class for the convenient notation of filter operations. 
+    """
     def __init__(self,roi,srcGrid,trgtGrid,timeIndex = None,channelIndex = None):
         #cast list due to TinyVector being strange
         self.roi = (list(roi.start),list(roi.stop))
         self.srcGrid = srcGrid
         self.trgtGrid = trgtGrid
         self.cIndex = channelIndex
+        #hardbind means that singletons get slices like (slice(0,50),slice(0,50),1)
+        #rather than (slice(0,50),slice(0,50),slice(0,1). The former results in a
+        #volume of shape (50,50), the latter in a volume of shape (50,50,1). vigra
+        #filters do not automatically iterate the time dimension
+        #timeIndex is automatically in hardBind
         if timeIndex is not None:
             self.hardBind = [timeIndex]
         else:
             self.hardBind = []
-            
 
     def nextStop(self,start,grid,roi):
+        #for a given start point it returns the next stop point, which would be
+        #the next intersection on the grid which does not share any common coordinate
+        #with the stop point and lies within the roi. else None is returned
         mult = [b/l for b,l in zip(start,grid)]
         gridStop = [(m+1)*l for m,l in zip(mult,grid)]
         roiStop = roi[1]
@@ -132,6 +141,8 @@ class AxisIterator:
             return nextStop
         
     def nextStarts(self,point,grid,roi):
+        #for a given point this method returns the points on the grid which are
+        #neighbouring in the positive direction and either in or on the roi
         nextPoint = self.nextStop(point,grid,roi)
         nextStarts = []
         if nextPoint:
@@ -143,6 +154,8 @@ class AxisIterator:
         return nextStarts
     
     def getSubRois(self,point,grid,roi):
+        #this method returns a list of rois of the form [start,stop], which is
+        #the roi broken down into subRois which completely cover the roi
         starts = [point]
         visited = []
         subRois = []
@@ -158,6 +171,8 @@ class AxisIterator:
         return subRois
     
     def getMask(self,subRoi,grid):
+        #this method returns a mask for a given subRoi. See the documentation on
+        #iterators for further detail
         start0 = subRoi[0]
         stop0 = subRoi[1]
         cIndex = self.cIndex
@@ -169,6 +184,8 @@ class AxisIterator:
         return (start1,stop1)
 
     def mapRoiToSource(self,subRoi,srcGrid=None,trgtGrid=None):
+        #this method maps a trgt roi to a src roi. how this is done is problem
+        #specific, so read the code
         start = subRoi[0]
         stop = subRoi[1]
         if srcGrid is None:
@@ -180,6 +197,7 @@ class AxisIterator:
         return (start,stop)
     
     def translateRoi(self,subRoi,point):
+        #this translates a subRoi by the amount point in the negative direction
         start = subRoi[0]
         stop = subRoi[1]
         start = [start[i] - point[i] for i in range(len(start))]
@@ -187,6 +205,7 @@ class AxisIterator:
         return (start,stop)
     
     def toSlice(self,roi,hardBind=False):
+        #translates a roi into a slice. with hardBind feature
         start = roi[0]
         stop = roi[1]
         rTsl1 = lambda x,y:slice(x.__int__(),y.__int__())
@@ -203,6 +222,8 @@ class AxisIterator:
             return tuple(map(rTsl1,start,stop))
     
     def __iter__(self):
+        #builds the iter space and returns it, the rois are translated relative
+        #to the given roi
         trgtRois = self.getSubRois(self.roi[0], self.trgtGrid, self.roi)
         srcRoi = self.mapRoiToSource(self.roi)
         retRoi = [(self.translateRoi(self.mapRoiToSource(roi),srcRoi[0]),\
@@ -211,7 +232,3 @@ class AxisIterator:
         retSlice = [(self.toSlice(src,True),self.toSlice(trgt,True),self.toSlice(mask)) \
                     for src,trgt,mask in retRoi]
         return retSlice.__iter__()
- 
-if __name__ == "__main__":
-    
-    pass

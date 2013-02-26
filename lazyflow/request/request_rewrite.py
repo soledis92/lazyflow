@@ -291,7 +291,6 @@ class Request( object ):
                         then a Request.TimeoutException is raised.
         """        
         assert not self._cleaned, "Can't wait() for a request that has already been cleaned."
-        print 'LOL'
         return self._wait(timeout)
 
     def block(self, timeout=None):
