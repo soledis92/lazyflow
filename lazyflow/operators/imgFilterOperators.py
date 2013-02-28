@@ -430,7 +430,7 @@ class OpPixelFeaturesPresmoothed(Operator):
         proximus = None
         for sig in range(len(self.inMatrix)): #loop through sigmas
             if reduce(lambda x, y: x or y, self.inMatrix[sig]):
-                self.smoothers[sig] = OpGaussianSmoothing(graph=self.graph)
+                self.smoothers[sig] = OpGaussianSmoothing(parent=self)
                 if first:
                     self.smoothers[sig].Input.connect(self.Input)
                     self.smoothers[sig].Sigma.setValue(self.modSigmas[sig])
@@ -448,7 +448,7 @@ class OpPixelFeaturesPresmoothed(Operator):
                 if self.smoothers[sig] is not None: #needed at all?
                     for feat in range(len(self.inMatrix[sig])):#loop through features
                         if self.inMatrix[sig][feat]: #if true: instantiate, configure  and connect operator
-                            self.operatorMatrix[sig][feat] = self.FeatureInfos[self.features[feat]][0](graph=self.graph)
+                            self.operatorMatrix[sig][feat] = self.FeatureInfos[self.features[feat]][0](parent=self)
                             self.operatorMatrix[sig][feat].Input.connect(self.smoothers[sig].Output)
                             self.operatorMatrix[sig][feat].Sigma.setValue(self.destSigma)
                             if self.FeatureInfos[self.features[feat]][1]:#is there a second sigma needed?
