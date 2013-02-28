@@ -195,7 +195,6 @@ class Request( object ):
         if not self.cancelled:
             try:
                 # Do the actual work
-                self.fn()
                 self._result = self.fn()
             except Request.CancellationException:
                 # Don't propagate cancellations back to the worker thread,
