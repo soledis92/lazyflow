@@ -110,10 +110,13 @@ class OpBaseVigraFilter(Operator):
             origRoi.popDim(channelIndex)
         origRoi.adjustRoi(halo)
         
+        def compute( source, trgt, mask, origRoi ):
+            result[trgt] = self.vigraFilter(source=source, window_size=self.windowSize, roi=origRoi)[mask]
+
         #iterate over the requested volumes
         pool = Pool()
         for src, trgt, mask in nIt:
-            req = Request(partial(result.__setitem__, trgt, self.vigraFilter(source=source[src], window_size=self.windowSize, roi=origRoi)[mask]))
+            req = Request( partial(compute, source[src], trgt, mask, origRoi) )
             pool.add(req)
         pool.wait()
         return result
