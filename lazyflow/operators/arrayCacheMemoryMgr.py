@@ -4,6 +4,7 @@ import time
 import threading
 import logging
 import weakref
+import platform
 logger = logging.getLogger(__name__)
 traceLogger = logging.getLogger("TRACE." + __name__)
 
@@ -13,6 +14,18 @@ import psutil
 
 #lazyflow
 from lazyflow.utility import OrderedSignal
+
+def memoryUsagePercentage():
+    vmem = psutil.virtual_memory()
+    if 'Linux' in platform.platform():
+        return 100 * (vmem.total - vmem.available) / vmem.total
+    return 100 * (vmem.total - vmem.free) / vmem.total
+    
+def memoryUsageGB():
+    vmem = psutil.virtual_memory()
+    if 'Linux' in platform.platform():
+        return (vmem.total - vmem.available) / (1.0e9)
+    return (vmem.total - vmem.free) / (1.0e9)
 
 class MemInfoNode:
     def __init__(self):
@@ -41,10 +54,10 @@ class ArrayCacheMemoryMgr(threading.Thread):
         self.caches = set()
         self.namedCaches = []
 
-        self._max_usage_pct = 85
-        self._target_usage_pct = 70
+        self._max_usage = 85
+        self._target_usage = 70
         self._lock = threading.Lock()
-        self._last_usage = 0
+        self._last_usage = memoryUsagePercentage()
 
     def addNamedCache(self, array_cache):
         """add a cache to a special list of named caches
@@ -69,15 +82,9 @@ class ArrayCacheMemoryMgr(threading.Thread):
 
     def run(self):
         while True:
-            vmem = psutil.virtual_memory()
-            mem_usage_pct = vmem.percent
-
-            mem_usage_bytes = (vmem.total - vmem.available)
-            mem_usage_gb = mem_usage_bytes / (1e9)
-            max_usage_bytes = 0.01 * self._max_usage_pct * vmem.total
-            target_usage_bytes = 0.01 * self._target_usage_pct * vmem.total
-
-            delta = abs(self._last_usage - mem_usage_pct)
+            mem_usage = memoryUsagePercentage()
+            mem_usage_gb = memoryUsageGB()
+            delta = abs(self._last_usage - mem_usage)
             if delta > 10 or self.logger.level == logging.DEBUG:
                 cpu_usages = psutil.cpu_percent(interval=1, percpu=True)
                 avg = sum(cpu_usages) / len(cpu_usages)
@@ -96,28 +103,31 @@ class ArrayCacheMemoryMgr(threading.Thread):
                 
             time.sleep(10)
 
-            if mem_usage_bytes > max_usage_bytes:
+            if mem_usage > self._max_usage:
                 self.logger.info("freeing memory...")
                 count = 0
                 new_block_stats = blist.sortedlist()
                 self.traceLogger.debug("Updating {} caches".format( len(self.caches) ))
                 
                 with self._lock:
-                    # Remove expired weakrefs
-                    expired = filter( lambda weak: weak() is None, self.caches )
-                    for weak in expired:
-                        self.caches.pop(weak)
-                    caches = list(self.caches)
-
-                for weak_cache in caches:
-                    c = weak_cache()
-                    if c:
-                        for stats in c.get_block_stats():
-                            new_block_stats.add(stats)
-
-                while mem_usage_bytes > target_usage_bytes and len(new_block_stats) > 0:
-                    last_block_stats = new_block_stats.pop(-1)
-                    if last_block_stats.attempt_free_fn():
+                    count = 0
+                    not_freed = []
+                    old_length = len(self.caches)
+                    new_caches = self._new_list()
+                    self.traceLogger.debug("Updating {} caches".format( len(self.caches) ))
+                    for c in iter(self.caches):
+                        c._updatePriority(c._last_access)
+                        new_caches.add(c)
+                    self.caches = new_caches
+                    gc.collect()
+                    self.traceLogger.debug("Target mem usage: {}".format(self._target_usage))
+                    while mem_usage > self._target_usage and len(self.caches) > 0:
+                        self.traceLogger.debug("Mem usage: {}".format(mem_usage))
+                        last_cache = self.caches.pop(-1)
+                            
+                        freed = last_cache._freeMemory(refcheck = True)
+                        self.traceLogger.debug("Freed: {}".format(freed))
+                        mem_usage = memoryUsagePercentage()
                         count += 1
                         mem_usage_bytes -= last_block_stats.size_bytes
 
