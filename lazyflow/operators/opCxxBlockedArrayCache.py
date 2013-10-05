@@ -108,9 +108,7 @@ class OpCxxBlockedArrayCache( OpCache ):
             # Just provide whatever data we've already got.
             # The blockedarray outputs zeros if it has no data for a block.
             with self._lock:
-                t1 = time.time()
                 self._blockedarray.readSubarray( roi.start, roi.stop, result )
-                print "XXX", time.time()-t1
 
             # If we're giving the user any dirty data while we're fixed, we must 
             #  notify him with a dirty notification when we become unfixed
@@ -178,9 +176,7 @@ class OpCxxBlockedArrayCache( OpCache ):
             # As a potential optimization here, we could skip blocks that 
             #  were dirty (they were already written into result).
             # (For now, that's more trouble than its worth -- it may even hurt performance.)
-            t1 = time.time()
             self._blockedarray.readSubarray( roi.start, roi.stop, result )
-            print "YYY", roi, time.time()-t1
 
             # Decrement the bookkeeping state for all requests we waited for.
             # A block is not considered "clean" until its data has been transferred to all requests that wanted it.
