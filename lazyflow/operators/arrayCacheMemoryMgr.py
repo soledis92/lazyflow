@@ -88,9 +88,9 @@ class ArrayCacheMemoryMgr(threading.Thread):
             if delta > 10 or self.logger.level == logging.DEBUG:
                 cpu_usages = psutil.cpu_percent(interval=1, percpu=True)
                 avg = sum(cpu_usages) / len(cpu_usages)
-                self.logger.info( "RAM: {:1.3f} GB ({:02.0f}%), CPU: Avg={:02.0f}%, {}".format( mem_usage_gb, mem_usage_pct, avg, cpu_usages ))
+                self.logger.info( "RAM: {:1.3f} GB ({:02.0f}%), CPU: Avg={:02.0f}%, {}".format( mem_usage_gb, mem_usage, avg, cpu_usages ))
             if delta > 10:
-                self._last_usage = mem_usage_pct
+                self._last_usage = mem_usage
 
             #calculate total memory usage and send as signal
             tot = 0.0
