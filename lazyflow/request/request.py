@@ -85,6 +85,9 @@ class Request( object ):
     ###########################################################################
     ###########################################################################
     
+    # Optimization: Direct execution.  (See docs.)
+    direct_execution_permitted = True # Enabled
+    
     # One thread pool shared by all requests.
     # See initialization after this class definition (below)
     global_thread_pool = None
@@ -309,10 +312,15 @@ class Request( object ):
         If this request isn't started yet, schedule it to be started.
         """
         with self._lock:
-            if not self.started:
-                Request.increment_active_count()
-                self.started = True
-                self._wake_up()
+            self._submit_unlocked()
+    
+    def _submit_unlocked(self):
+        # You must own the lock before calling this function!
+        if not self.started:
+            Request.increment_active_count()
+            self.started = True
+            self._wake_up()
+        
     
     def _wake_up(self):
         """
@@ -393,7 +401,7 @@ class Request( object ):
         self.uncancellable = True
 
         with self._lock:
-            direct_execute_needed = not self.started and (timeout is None)
+            direct_execute_needed = not self.started and (timeout is None) and Request.direct_execution_permitted
             if direct_execute_needed:
                 # This request hasn't been started yet
                 # We can execute it directly in the current thread instead of submitting it to the request thread pool (big optimization).
@@ -457,6 +465,9 @@ class Request( object ):
                 # This request was already started and already failed.
                 # Simply raise the exception back to the current request.
                 raise self.exception_info[0], self.exception_info[1], self.exception_info[2]
+
+            if not Request.direct_execution_permitted and not self.started:
+                self._submit_unlocked()
 
             direct_execute_needed = not self.started
             suspend_needed = self.started and not self.execution_complete
