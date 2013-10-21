@@ -45,6 +45,45 @@ class SimpleSignal(object):
         self.callbacks = []
 
 class Request( object ):
+    ###########################################################################
+    ## Debug instrumentation
+    ###########################################################################
+    total_request_count = 0
+    active_request_count = 0
+    high_water_active_count = 0
+    count_lock = threading.Lock()
+    print_lock = threading.Lock()
+    
+    @classmethod
+    def request_status_check_loop(cls): # See daemon thread below.
+        import time
+        last_count = Request.active_request_count
+        while True:
+            time.sleep(1.0)
+            if last_count != Request.active_request_count:
+                Request.print_request_stats()
+                last_count = Request.active_request_count
+    
+    @classmethod
+    def print_request_stats(cls):
+        s = "Total: {}, Active high water mark: {} Currently Active: {}"\
+            "".format( Request.total_request_count, Request.high_water_active_count, Request.active_request_count )
+        with Request.print_lock:
+            print s
+    
+    @classmethod
+    def increment_active_count(cls):
+        with Request.count_lock:
+            Request.active_request_count += 1
+            Request.high_water_active_count = max(Request.high_water_active_count, Request.active_request_count)
+
+    @classmethod
+    def decrement_active_count(cls):
+        with Request.count_lock:
+            Request.active_request_count -= 1
+
+    ###########################################################################
+    ###########################################################################
     
     # One thread pool shared by all requests.
     # See initialization after this class definition (below)
@@ -108,6 +147,9 @@ class Request( object ):
         Constructor.
         Postconditions: The request has the same cancelled status as its parent (the request that is creating this one).
         """
+        with Request.count_lock:
+            Request.total_request_count += 1
+        
         # Workload
         self.fn = fn
 
@@ -259,13 +301,16 @@ class Request( object ):
             if self.greenlet is not None:
                 assert self.greenlet.owning_requests.pop() == self
             self.greenlet = None
-
+            
+            Request.decrement_active_count()
+            
     def submit(self):
         """
         If this request isn't started yet, schedule it to be started.
         """
         with self._lock:
             if not self.started:
+                Request.increment_active_count()
                 self.started = True
                 self._wake_up()
     
@@ -366,6 +411,7 @@ class Request( object ):
 
         if direct_execute_needed:
             self._current_foreign_thread = threading.current_thread()
+            Request.increment_active_count()
             self._execute()
         else:
             self.submit()
@@ -436,6 +482,9 @@ class Request( object ):
             self.greenlet = current_request.greenlet
             self.greenlet.owning_requests.append(self)
             self._assigned_worker = current_request._assigned_worker
+
+            Request.increment_active_count()
+
             self._execute()
             self.greenlet = None
             current_request.blocking_requests.remove(self)
@@ -604,6 +653,15 @@ class Request( object ):
         return self.result
 
 Request.reset_thread_pool()
+
+###########################################################################
+## Debug instrumentation
+###########################################################################
+request_monitor_thread = threading.Thread( target=Request.request_status_check_loop )
+request_monitor_thread.daemon = True
+request_monitor_thread.start()
+###########################################################################
+###########################################################################
 
 class RequestLock(object):
     """
