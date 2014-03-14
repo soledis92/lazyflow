@@ -26,8 +26,10 @@ from lazyflow.graph import Graph
 from lazyflow.operators import OpCompressedCache, OpArrayPiper
 from lazyflow.utility.slicingtools import slicing2shape
 
+import lazyflow
 logger = logging.getLogger("tests.testOpCompressedCache")
-cacheLogger = logging.getLogger("lazyflow.operators.opCompressedCache")
+cacheLogger = lazyflow.operators.opCompressedCache.logger
+cacheTraceLogger = lazyflow.operators.opCompressedCache.traceLogger
 
 class TestOpCompressedCache( object ):
     
@@ -237,10 +239,13 @@ if __name__ == "__main__":
     # Set up logging for debug
     logHandler = logging.StreamHandler( sys.stdout )
     logger.addHandler( logHandler )
-    cacheLogger.addHandler( logHandler )
-
     logger.setLevel( logging.DEBUG )
+
+    cacheLogger.addHandler( logHandler )
     cacheLogger.setLevel( logging.DEBUG )
+
+    cacheTraceLogger.addHandler( logHandler )
+    cacheTraceLogger.setLevel( logging.DEBUG )
 
     # Run nose
     import sys

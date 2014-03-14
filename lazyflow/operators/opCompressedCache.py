@@ -31,7 +31,10 @@ from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.roi import TinyVector, getIntersectingBlocks, getBlockBounds, roiToSlice, getIntersection
 from lazyflow.operators.opCache import OpCache
 
+from lazyflow.utility import traceLogged
+
 logger = logging.getLogger(__name__)
+traceLogger = logging.getLogger("TRACE." + __name__)
 
 class OpCompressedCache(OpCache):
     """
@@ -46,6 +49,7 @@ class OpCompressedCache(OpCache):
     CleanBlocks = OutputSlot() # A list of rois (tuples) of the blocks that are currently stored in the cache
     OutputHdf5 = OutputSlot() # Provides data as hdf5 datasets.  Only allowed for rois that exactly match a block.
     
+    @traceLogged(traceLogger)
     def __init__(self, *args, **kwargs):
         super( OpCompressedCache, self ).__init__( *args, **kwargs )
         self._blockshape = None
@@ -55,12 +59,14 @@ class OpCompressedCache(OpCache):
         self._blockLocks = {}
 
 
+    @traceLogged(traceLogger)
     def cleanUp(self):
         logger.debug( "Cleaning up" )
         self._closeAllCacheFiles()
         super( OpCompressedCache, self ).cleanUp()
 
 
+    @traceLogged(traceLogger)
     def setupOutputs(self):
         self._closeAllCacheFiles()
         self.Output.meta.assignFrom(self.Input.meta)
@@ -78,6 +84,7 @@ class OpCompressedCache(OpCache):
         self._chunkshape = self._chooseChunkshape(self._blockshape)
 
 
+    @traceLogged(traceLogger)
     def execute(self, slot, subindex, roi, destination):
         if slot == self.Output:
             
@@ -90,6 +97,7 @@ class OpCompressedCache(OpCache):
             assert False, "Unknown output slot: {}".format( slot.name )
         
 
+    @traceLogged(traceLogger)
     def _executeOutput(self, roi, destination):
         t = time.time()
         assert len(roi.stop) == len(self.Input.meta.shape), "roi: {} has the wrong number of dimensions for Input shape: {}".format( roi, self.Input.meta.shape )
@@ -127,6 +135,7 @@ class OpCompressedCache(OpCache):
         return destination
 
 
+    @traceLogged(traceLogger)
     def _executeCleanBlocks(self, destination):
         """
         Execute function for the CleanBlocks output slot, which produces 
@@ -141,6 +150,7 @@ class OpCompressedCache(OpCache):
         destination[0] = map( partial(map, TinyVector), clean_block_rois )
         return destination
 
+    @traceLogged(traceLogger)
     def _executeOutputHdf5(self, roi, destination):
         logger.debug("Servicing request for hdf5 block {}".format( roi ))
 
@@ -156,6 +166,7 @@ class OpCompressedCache(OpCache):
         destination.copy( dataset, str(block_roi) )
         return destination        
 
+    @traceLogged(traceLogger)
     def propagateDirty(self, slot, subindex, roi):
         if slot == self.Input:
             # Keep track of dirty blocks
@@ -174,6 +185,7 @@ class OpCompressedCache(OpCache):
             assert False, "Unknown output slot"
             
 
+    @traceLogged(traceLogger)
     def _chooseChunkshape(self, blockshape):
         """
         Choose an optimal chunkshape for our blockshape and Input shape.
@@ -228,6 +240,7 @@ class OpCompressedCache(OpCache):
         logger.debug("Using chunk shape: {}".format( chunkshape ))
         return chunkshape
 
+    @traceLogged(traceLogger)
     def _getDtypeBytes(self, dtype):
         if type(dtype) is numpy.dtype:
             # Make sure we're dealing with a type (e.g. numpy.float64),
@@ -235,6 +248,7 @@ class OpCompressedCache(OpCache):
             dtype = dtype.type
         return dtype().nbytes
     
+    @traceLogged(traceLogger)
     def usedMemory(self):
         #FIXME
         tot = 0.0
@@ -243,6 +257,7 @@ class OpCompressedCache(OpCache):
                 tot += b["data"].size * self._getDtypeBytes(b["data"].dtype)
         return tot
     
+    @traceLogged(traceLogger)
     def generateReport(self, report):
         report.name = self.name
         report.fractionOfUsedMemoryDirty = self.fractionOfUsedMemoryDirty()
@@ -252,6 +267,7 @@ class OpCompressedCache(OpCache):
         report.type = type(self)
         report.id = id(self)
 
+    @traceLogged(traceLogger)
     def _getCacheFile(self, entire_block_roi):
         """
         Get the cache file for the block that starts at block_start.
@@ -282,6 +298,7 @@ class OpCompressedCache(OpCache):
             return self._cacheFiles[block_start]
 
 
+    @traceLogged(traceLogger)
     def _ensureCached(self, entire_block_roi):
         """
         Ensure that the cache file for the given block is up-to-date.
@@ -315,6 +332,7 @@ class OpCompressedCache(OpCache):
                 self.OutputHdf5._sig_value_changed()
                 self.CleanBlocks._sig_value_changed()
 
+    @traceLogged(traceLogger)
     def setInSlot(self, slot, subindex, roi, value):
         """
         Overridden from Operator
@@ -326,6 +344,7 @@ class OpCompressedCache(OpCache):
         else:
             assert False, "Invalid input slot for setInSlot(): {}".format( slot.name )
 
+    @traceLogged(traceLogger)
     def _setInSlotInput(self, slot, subindex, roi, value):
         assert len(roi.stop) == len(self.Input.meta.shape), \
             "roi: {} has the wrong number of dimensions for Input shape: {}"\
@@ -363,6 +382,7 @@ class OpCompressedCache(OpCache):
 #            self.OutputHdf5._sig_value_changed()
 #            self.CleanBlocks._sig_value_changed()
 
+    @traceLogged(traceLogger)
     def _setInSlotInputHdf5(self, slot, subindex, roi, value):
         logger.debug("Setting block {} from hdf5".format( roi ))
         assert isinstance( value, h5py.Dataset ), "InputHdf5 slot requires an hdf5 Dataset to copy from (not a numpy array)."
@@ -392,6 +412,7 @@ class OpCompressedCache(OpCache):
 #        self.OutputHdf5._sig_value_changed()
 #        self.CleanBlocks._sig_value_changed()
 
+    @traceLogged(traceLogger)
     def _getBlockDataset(self, entire_block_roi):
         """
         Get the correct cache file and return the *dataset* handle,
@@ -401,6 +422,7 @@ class OpCompressedCache(OpCache):
         return block_file['data']
 
 
+    @traceLogged(traceLogger)
     def _closeAllCacheFiles(self):
         logger.debug( "Closing all caches" )
         cacheFiles = self._cacheFiles
