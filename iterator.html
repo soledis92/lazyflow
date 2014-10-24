@@ -10,8 +10,8 @@
     
     <title>Axis Iterator &mdash; lazyflow 0.1 documentation</title>
     
-    <link rel="stylesheet" href="_static/default.css" type="text/css" />
-    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <link rel="stylesheet" href="static/default.css" type="text/css" />
+    <link rel="stylesheet" href="static/pygments.css" type="text/css" />
     
     <script type="text/javascript">
       var DOCUMENTATION_OPTIONS = {
@@ -22,9 +22,9 @@
         HAS_SOURCE:  true
       };
     </script>
-    <script type="text/javascript" src="_static/jquery.js"></script>
-    <script type="text/javascript" src="_static/underscore.js"></script>
-    <script type="text/javascript" src="_static/doctools.js"></script>
+    <script type="text/javascript" src="static/jquery.js"></script>
+    <script type="text/javascript" src="static/underscore.js"></script>
+    <script type="text/javascript" src="static/doctools.js"></script>
     <link rel="top" title="lazyflow 0.1 documentation" href="index.html" /> 
   </head>
   <body>
@@ -67,7 +67,7 @@
 </div>
 <p>It could be visualized like this:</p>
 <div class="figure">
-<a class="reference internal image-reference" href="_images/iterator_exposition.svg"><img alt="iterator exposition" src="_images/iterator_exposition.svg" /></a>
+<a class="reference internal image-reference" href="images/iterator_exposition.svg"><img alt="iterator exposition" src="images/iterator_exposition.svg" /></a>
 </div>
 <p>Using this:</p>
 <div class="highlight-python"><div class="highlight"><pre><span class="k">for</span> <span class="n">src</span><span class="p">,</span><span class="n">trgt</span><span class="p">,</span><span class="n">mask</span> <span class="ow">in</span> <span class="n">it</span><span class="p">:</span>
@@ -118,25 +118,25 @@
 </div>
 <p>As you can see, for every <tt class="docutils literal"><span class="pre">trgt</span></tt> slice there is a correspondig <tt class="docutils literal"><span class="pre">src</span></tt> and <tt class="docutils literal"><span class="pre">mask</span></tt> slice. In the first step the <tt class="docutils literal"><span class="pre">roi</span></tt> gets broken down in a number of <tt class="docutils literal"><span class="pre">trgt</span></tt> slices:</p>
 <div class="figure">
-<a class="reference internal image-reference" href="_images/iterator_roiToTrgtSlices.svg"><img alt="roi being broken down into trgt slices" src="_images/iterator_roiToTrgtSlices.svg" /></a>
+<a class="reference internal image-reference" href="images/iterator_roiToTrgtSlices.svg"><img alt="roi being broken down into trgt slices" src="images/iterator_roiToTrgtSlices.svg" /></a>
 </div>
 <p>This is achieved by <tt class="docutils literal"><span class="pre">getSubRois(self,point,grid,roi)</span></tt>,which calls <tt class="docutils literal"><span class="pre">nextStop(self,start,grid,roi)</span></tt> and <tt class="docutils literal"><span class="pre">nextStarts(self,point,grid,roi)</span> <span class="pre">``</span> <span class="pre">repeatedly.</span> <span class="pre">For</span> <span class="pre">each</span> <span class="pre">point</span> <span class="pre">``nextStarts()</span></tt> returns
 the next points where either the grid intersects the grid itself or the <tt class="docutils literal"><span class="pre">roi</span></tt>. <tt class="docutils literal"><span class="pre">nextStop()</span></tt> returns for each starting point the stopping point, meaning the next point where the grid intersects itself or the <tt class="docutils literal"><span class="pre">roi</span></tt> AND the point where the volume of `` [start,stop]`` is greater than zero. Visualized:</p>
 <div class="figure">
-<a class="reference internal image-reference" href="_images/iterator_nextStarts.svg"><img alt="getting all start points" src="_images/iterator_nextStarts.svg" /></a>
+<a class="reference internal image-reference" href="images/iterator_nextStarts.svg"><img alt="getting all start points" src="images/iterator_nextStarts.svg" /></a>
 </div>
 <p>When you have all starting points, <tt class="docutils literal"><span class="pre">nextStop()</span></tt> can be used to find the next stopping point, IF there is one. Two examples:</p>
 <div class="figure">
-<a class="reference internal image-reference" href="_images/iterator_nextStop.svg"><img alt="assigning stopping points" src="_images/iterator_nextStop.svg" /></a>
+<a class="reference internal image-reference" href="images/iterator_nextStop.svg"><img alt="assigning stopping points" src="images/iterator_nextStop.svg" /></a>
 </div>
 <p>The last step is of course merely conceptual. Once the <tt class="docutils literal"><span class="pre">trgt</span></tt> space is segmented into <tt class="docutils literal"><span class="pre">trgt</span></tt> slices, each <tt class="docutils literal"><span class="pre">trgt</span></tt> slice is mapped to a <tt class="docutils literal"><span class="pre">src</span></tt> slice. This is done using the <tt class="docutils literal"><span class="pre">mapRoiToSource()</span></tt> method. HOW this mapping is done is up to the developer. In the current implementation it fits the needs of image filtering. An illustration:</p>
 <div class="figure">
-<a class="reference internal image-reference" href="_images/iterator_mapToSrc.svg"><img alt="mapping a trgt roi to the src roi" src="_images/iterator_mapToSrc.svg" /></a>
+<a class="reference internal image-reference" href="images/iterator_mapToSrc.svg"><img alt="mapping a trgt roi to the src roi" src="images/iterator_mapToSrc.svg" /></a>
 </div>
 <p>Now all that has to be done is to create the <tt class="docutils literal"><span class="pre">mask</span></tt> slice. Why is there a need for this? Sometimes the filter operation inflates the image and returns e.g. 3 channels even if you requested just one. The <tt class="docutils literal"><span class="pre">mask</span></tt>
 slice cuts out the desired part. Here is an illustration:</p>
 <div class="figure">
-<a class="reference internal image-reference" href="_images/iterator_mask.svg"><img alt="mapping a trgt roi to the src roi" src="_images/iterator_mask.svg" /></a>
+<a class="reference internal image-reference" href="images/iterator_mask.svg"><img alt="mapping a trgt roi to the src roi" src="images/iterator_mask.svg" /></a>
 </div>
 <p>Finally <tt class="docutils literal"><span class="pre">src</span></tt>, <tt class="docutils literal"><span class="pre">trgt</span></tt> and <tt class="docutils literal"><span class="pre">mask</span></tt> slices are grouped together and returned.</p>
 </div>
@@ -297,7 +297,7 @@ slice cuts out the desired part. Here is an illustration:</p>
 
   <h3>This Page</h3>
   <ul class="this-page-menu">
-    <li><a href="_sources/iterator.txt"
+    <li><a href="sources/iterator.txt"
            rel="nofollow">Show Source</a></li>
   </ul>
 <div id="searchbox" style="display: none">
