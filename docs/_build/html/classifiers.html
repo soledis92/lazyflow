@@ -8,8 +8,8 @@
     
     <title>Classifiers &mdash; lazyflow 0.1 documentation</title>
     
-    <link rel="stylesheet" href="_static/default.css" type="text/css" />
-    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <link rel="stylesheet" href="static/default.css" type="text/css" />
+    <link rel="stylesheet" href="static/pygments.css" type="text/css" />
     
     <script type="text/javascript">
       var DOCUMENTATION_OPTIONS = {
@@ -20,9 +20,9 @@
         HAS_SOURCE:  true
       };
     </script>
-    <script type="text/javascript" src="_static/jquery.js"></script>
-    <script type="text/javascript" src="_static/underscore.js"></script>
-    <script type="text/javascript" src="_static/doctools.js"></script>
+    <script type="text/javascript" src="static/jquery.js"></script>
+    <script type="text/javascript" src="static/underscore.js"></script>
+    <script type="text/javascript" src="static/doctools.js"></script>
     <link rel="top" title="lazyflow 0.1 documentation" href="index.html" />
     <link rel="next" title="Maintaining this Documentation" href="documentation_maintenance.html" />
     <link rel="prev" title="Utilities" href="utilities.html" /> 
@@ -152,7 +152,7 @@ and a list of corresponding ND label images, with 1 channel each.</p>
 <p>Note: It is assumed here that &#8216;channel&#8217; is always the last axis of the image.</p>
 <dl class="method">
 <dt id="lazyflow.classifiers.LazyflowPixelwiseClassifierFactoryABC.create_and_train_pixelwise">
-<tt class="descname">create_and_train_pixelwise</tt><big>(</big><em>feature_images</em>, <em>label_images</em><big>)</big><a class="headerlink" href="#lazyflow.classifiers.LazyflowPixelwiseClassifierFactoryABC.create_and_train_pixelwise" title="Permalink to this definition">¶</a></dt>
+<tt class="descname">create_and_train_pixelwise</tt><big>(</big><em>featureimages</em>, <em>labelimages</em><big>)</big><a class="headerlink" href="#lazyflow.classifiers.LazyflowPixelwiseClassifierFactoryABC.create_and_train_pixelwise" title="Permalink to this definition">¶</a></dt>
 <dd><p>Create a new classifier and train it with the given list of feature images and the given list of label images.
 Generally, it is assumed that the channel dimension is the LAST axis for each image.  
 (The label image must include a singleton channel dimension.)
@@ -255,7 +255,7 @@ pixel belongs to each label class the classifier was trained with.</p>
                         title="next chapter">Maintaining this Documentation</a></p>
   <h3>This Page</h3>
   <ul class="this-page-menu">
-    <li><a href="_sources/classifiers.txt"
+    <li><a href="sources/classifiers.txt"
            rel="nofollow">Show Source</a></li>
   </ul>
 <div id="searchbox" style="display: none">
