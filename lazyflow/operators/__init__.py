@@ -59,6 +59,7 @@ except:
     from adaptors import Op5ifyer
     from opCompressedCache import OpCompressedCache
     from opCompressedUserLabelArray import OpCompressedUserLabelArray
+    from opCompressedUserCropArray import OpCompressedUserCropArray
     from opLabelImage import OpLabelImage
     from opCachedLabelImage import OpCachedLabelImage
     from opInterpMissingData import OpInterpMissingData
