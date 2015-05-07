@@ -1,5 +1,5 @@
 import numpy
-from lazyflow.roi import determineBlockShape, getIntersection
+from lazyflow.roi import determineBlockShape, getIntersection, enlargeRoiForHalo, TinyVector, nonzero_bounding_box, containing_rois
 
 class Test_determineBlockShape(object):
     
@@ -55,6 +55,76 @@ class Test_getIntersection(object):
         roiB = [(15,26,27), (16,30,30)]
         intersection = getIntersection( roiA, roiB , assertIntersect=False)
         assert intersection is None, "Expected None because {} doesn't intersect with {}".format(  )
+
+class test_enlargeRoiForHalo(object):
+    
+    def testBasic(self):
+        start = TinyVector([10, 100, 200, 300, 1])
+        stop = TinyVector([11, 150, 300, 500, 3])
+        image_shape = [20, 152, 500, 500, 10]
+        
+        sigma = 3.1
+        window = 2
+        enlarge_axes = (False, True, True, True, False)
+        
+        enlarged_start, enlarged_stop = enlargeRoiForHalo(start, stop, image_shape, sigma, window, enlarge_axes )
+        
+        full_halo_width = numpy.ceil(sigma*window)
+        
+        # Non-enlarged axes should remain the same
+        assert (enlarged_start[[0,4]] == (start[0], start[4])).all(), \
+            "{} == {}".format( enlarged_start[[0,4]], (start[0], start[4]) )
+        assert (enlarged_stop[[0,4]] == (stop[0], stop[4])).all(), \
+            "{} == {}".format( enlarged_stop[[0,4]], (stop[0], stop[4]) )
+        
+        # The start coord isn't close to the image border, so the halo should be full-sized on the start side
+        assert (enlarged_start[1:4] == numpy.array(start)[1:4] - full_halo_width).all()
+
+        # The stop coord is close to the image border in some dimensions, 
+        #  so some axes couldn't be expanded by the full halo width.
+        assert enlarged_stop[1] == 152
+        assert enlarged_stop[2] == stop[2] + full_halo_width
+        assert enlarged_stop[3] == 500
+
+class test_nonzero_bounding_box(object):
+    
+    def testBasic(self):
+        data = numpy.zeros( (10,100,100), numpy.uint8 )
+        data[4, 30:40, 50:60] = 1
+        data[7, 45:55, 30:35] = 255
+        bb_roi = nonzero_bounding_box(data)
+        assert isinstance(bb_roi, numpy.ndarray)
+        assert (bb_roi == [[4,30,30], [8,55,60]]).all()
+    
+    def test_empty_data(self):
+        data = numpy.zeros( (10,100,100), numpy.uint8 )
+        bb_roi = nonzero_bounding_box(data)
+        assert isinstance(bb_roi, numpy.ndarray)
+        assert (bb_roi == [[0,0,0], [0,0,0]]).all()
+
+class test_containing_rois(object):
+    
+    def testBasic(self):
+        rois = [([0,0,0], [10,10,10]),
+                ([5,3,2], [11,12,13]),
+                ([4,6,4], [5,9,9])]
+        
+        result = containing_rois( rois, ( [4,7,6], [5,8,8] ) )
+        assert ( result == [([0,0,0], [10,10,10]),
+                            ([4,6,4], [5,9,9])] ).all()
+
+    def testEmptyResult(self):
+        rois = [([0,0,0], [10,10,10]),
+                ([5,3,2], [11,12,13]),
+                ([4,6,4], [5,9,9])]
+        
+        result = containing_rois( rois, ( [100,100,100], [200,200,200] ) )
+        assert result.shape == (0, 2, 3)
+
+    def testEmptyInput(self):
+        rois = []
+        result = containing_rois( rois, ( [100,100,100], [200,200,200] ) )
+        assert result.shape == (0,)
 
 if __name__ == "__main__":
     # Run nose

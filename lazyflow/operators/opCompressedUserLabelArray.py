@@ -27,17 +27,17 @@ import collections
 import numpy
 
 # Lazyflow
-from lazyflow.graph import Operator, InputSlot, OutputSlot
+from lazyflow.graph import InputSlot, OutputSlot
 from lazyflow.roi import TinyVector, getIntersectingBlocks, getBlockBounds, roiToSlice, getIntersection, roiFromShape
-from lazyflow.operators.opCache import OpCache
-from lazyflow.operators.opCompressedCache import OpCompressedCache
+from lazyflow.operators.opCompressedCache import OpUnmanagedCompressedCache
 from lazyflow.rtype import SubRegion
 
 logger = logging.getLogger(__name__)
 
-class OpCompressedUserLabelArray(OpCompressedCache):
+class OpCompressedUserLabelArray(OpUnmanagedCompressedCache):
     """
-    A subclass of OpCompressedCache that is suitable for storing user-drawn label pixels.
+    A subclass of OpUnmanagedCompressedCache that is suitable for storing user-drawn label pixels.
+    (This is not a 'managed' cache because its data must never be deleted by the memory manager.)
     Note that setInSlot has special functionality (only non-zero pixels are written, and there is also an "eraser" pixel value).
 
     See note below about blockshape changes.
@@ -54,22 +54,29 @@ class OpCompressedUserLabelArray(OpCompressedCache):
     nonzeroBlocks = OutputSlot()
     #maxLabel = OutputSlot()
     
-    Projection2D = OutputSlot() # A somewhat magic output that returns a projection of all 
-                                # label data underneath a given roi, from all slices.
-                                # If, for example, a 256x1x256 tile is requested from this slot,
-                                # It will return a projection of ALL labels that fall within the 256 x ... x 256 tile.
-                                # (The projection axis is *inferred* from the shape of the requested data).
-                                # The projection data is float32 between 0.0 and 1.0, where:
-                                # - Exactly 0.0 means "no labels under this pixel"
-                                # - 1/256.0 means "labels in the first slice"
-                                # - ...
-                                # - 1.0 means "last slice"
-                                # The output is suitable for display in a colortable.
+    Projection2D = OutputSlot(allow_mask=True) # A somewhat magic output that returns a projection of all
+                                               # label data underneath a given roi, from all slices.
+                                               # If, for example, a 256x1x256 tile is requested from this slot,
+                                               # It will return a projection of ALL labels that fall within the 256 x ... x 256 tile.
+                                               # (The projection axis is *inferred* from the shape of the requested data).
+                                               # The projection data is float32 between 0.0 and 1.0, where:
+                                               # - Exactly 0.0 means "no labels under this pixel"
+                                               # - 1/256.0 means "labels in the first slice"
+                                               # - ...
+                                               # - 1.0 means "last slice"
+                                               # The output is suitable for display in a colortable.
     
     def __init__(self, *args, **kwargs):
-        super(OpCompressedUserLabelArray, self).__init__( *args, **kwargs )
         self._blockshape = None
         self._label_to_purge = 0
+        super(OpCompressedUserLabelArray, self).__init__( *args, **kwargs )
+    
+    def clearLabel(self, label_value):
+        """
+        Clear (reset to 0) all pixels of the given label value.
+        Unlike using the deleteLabel slot, this function does not "shift down" all labels above this label value.
+        """
+        self._purge_label( label_value, False )
     
     def setupOutputs(self):
         # Due to a temporary naming clash, pass our subclass blockshape to the superclass
@@ -119,13 +126,14 @@ class OpCompressedUserLabelArray(OpCompressedCache):
             if self._label_to_purge != new_purge_label:
                 self._label_to_purge = new_purge_label
                 if self._label_to_purge > 0:
-                    self._purge_label( self._label_to_purge )
+                    self._purge_label( self._label_to_purge, True )
     
-    def _purge_label(self, label_to_purge):
+    def _purge_label(self, label_to_purge, decrement_remaining):
         """
         Scan through all labeled pixels.
         (1) Clear all pixels of the given value (set to 0)
-        (2) Decrement all labels above that value so the set of stored labels is consecutive
+        (2) if decrement_remaining=True, decrement all labels above that 
+            value so the set of stored labels remains consecutive
         """
         changed_block_rois = []
         #stored_block_rois = self.CleanBlocks.value
@@ -136,7 +144,8 @@ class OpCompressedUserLabelArray(OpCompressedCache):
         for block_roi in stored_block_rois:
             # Get data
             block_shape = numpy.subtract( block_roi[1], block_roi[0] )
-            block = numpy.ndarray( shape=block_shape, dtype=self.Output.meta.dtype )
+            block = self.Output.stype.allocateDestination(SubRegion(self.Output, *roiFromShape(block_shape)))
+
             self.execute(self.Output, (), SubRegion( self.Output, *block_roi ), block)
 
             # Locate pixels to change
@@ -145,15 +154,16 @@ class OpCompressedUserLabelArray(OpCompressedCache):
 
             # Change the data
             block[matching_label_coords] = 0
-            block = numpy.where( coords_to_decrement, block-1, block )
+            if decrement_remaining:
+                block[coords_to_decrement] -= 1
             
             # Update cache with the new data (only if something really changed)
-            if len(matching_label_coords[0]) > 0 or len(coords_to_decrement[0]) > 0:
+            if len(matching_label_coords[0]) > 0 or (decrement_remaining and coords_to_decrement.sum() > 0):
                 super( OpCompressedUserLabelArray, self )._setInSlotInput( self.Input, (), SubRegion( self.Output, *block_roi ), block, store_zero_blocks=False )
                 changed_block_rois.append( block_roi )
 
         for block_roi in changed_block_rois:
-            # FIXME: Shouldn't this dirty notification be handled in OpCompressedCache?
+            # FIXME: Shouldn't this dirty notification be handled in OpUnmanagedCompressedCache?
             self.Output.setDirty( *block_roi )
     
     def execute(self, slot, subindex, roi, destination):
@@ -247,12 +257,24 @@ class OpCompressedUserLabelArray(OpCompressedCache):
             # Compute slicing within the deep array and slicing within this block
             deep_relative_intersection = numpy.subtract(intersecting_roi, input_roi.start)
             block_relative_intersection = numpy.subtract(intersecting_roi, block_start)
-                        
-            deep_data = self._getBlockDataset( entire_block_roi )[roiToSlice(*block_relative_intersection)]
+            block_relative_intersection_slicing = roiToSlice(*block_relative_intersection)
 
-            # make binary and convert to float
-            deep_data_float = numpy.where( deep_data, numpy.float32(1.0), numpy.float32(0.0) )
-            
+            block = self._getBlockDataset( entire_block_roi )
+            deep_data = None
+            if self.Output.meta.has_mask:
+                deep_data = numpy.ma.masked_array(
+                    block["data"][block_relative_intersection_slicing],
+                    mask=block["mask"][block_relative_intersection_slicing],
+                    fill_value=block["fill_value"][()],
+                    shrink=False
+                )
+            else:
+                deep_data = block[block_relative_intersection_slicing]
+
+            # make binary and convert to float (must copy)
+            deep_data_float = deep_data.astype(numpy.float32)
+            deep_data_float[deep_data_float.nonzero()] = 1
+
             # multiply by slice-index
             deep_data_view = numpy.rollaxis(deep_data_float, projection_axis_index, 0)
 
@@ -278,19 +300,22 @@ class OpCompressedUserLabelArray(OpCompressedCache):
                               [ (slice(None),) + (None,)*(deep_data_view.ndim-1) ]
 
             # Take the max projection of this block's data.
-            block_max_projection = numpy.amax(deep_data_float, axis=projection_axis_index, keepdims=True)
+            block_max_projection = deep_data_float.max(axis=projection_axis_index)
+            block_max_projection = numpy.ma.expand_dims(block_max_projection, axis=projection_axis_index)
 
             # Merge this block's projection into the overall projection.
             destination_relative_intersection = numpy.array(deep_relative_intersection)
-            destination_relative_intersection[:, projection_axis_index] = (0,1)            
-            destination_subview = destination[roiToSlice(*destination_relative_intersection)]            
+            destination_relative_intersection[:, projection_axis_index] = (0,1)
+            destination_relative_intersection_slicing = roiToSlice(*destination_relative_intersection)
+
+            destination_subview = destination[destination_relative_intersection_slicing]
             numpy.maximum(block_max_projection, destination_subview, out=destination_subview)
             
             # Invert the nonzero pixels so increasing colors correspond to increasing slices.
             # See comment in calc_color_value(), above.
-            destination_subview[:] = numpy.where(destination_subview, 
-                                                 numpy.float32(1.0) - destination_subview, 
-                                                 numpy.float32(0.0))
+            destination_subview[destination_subview.nonzero()] -= 1
+            destination_subview[()] = -destination_subview
+
         return
 
     def _copyData(self, roi, destination, block_starts):
@@ -309,14 +334,22 @@ class OpCompressedUserLabelArray(OpCompressedCache):
             # Compute slicing within destination array and slicing within this block
             destination_relative_intersection = numpy.subtract(intersecting_roi, roi.start)
             block_relative_intersection = numpy.subtract(intersecting_roi, block_start)
-            
+            destination_relative_intersection_slicing = roiToSlice(*destination_relative_intersection)
+            block_relative_intersection_slicing = roiToSlice(*block_relative_intersection)
+
             if block_start in self._cacheFiles:
                 # Copy from block to destination
                 dataset = self._getBlockDataset( entire_block_roi )
-                destination[ roiToSlice(*destination_relative_intersection) ] = dataset[ roiToSlice( *block_relative_intersection ) ]
+
+                if self.Output.meta.has_mask:
+                    destination[ destination_relative_intersection_slicing ] = dataset["data"][ block_relative_intersection_slicing ]
+                    destination.mask[ destination_relative_intersection_slicing ] = dataset["mask"][ block_relative_intersection_slicing ]
+                    destination.fill_value = dataset["fill_value"][()]
+                else:
+                    destination[ destination_relative_intersection_slicing ] = dataset[ block_relative_intersection_slicing ]
             else:
                 # Not stored yet.  Overwrite with zeros.
-                destination[ roiToSlice(*destination_relative_intersection) ] = 0
+                destination[ destination_relative_intersection_slicing ] = 0
 
     def propagateDirty(self, slot, subindex, roi):
         # There should be no way to make the output dirty except via setInSlot()
@@ -344,7 +377,8 @@ class OpCompressedUserLabelArray(OpCompressedCache):
         """
 
         # Extract the data to modify
-        original_data = numpy.ndarray( shape=new_pixels.shape, dtype=self.Output.meta.dtype )
+        original_data = self.Output.stype.allocateDestination(SubRegion(self.Output, *roiFromShape(new_pixels.shape)))
+
         self.execute(self.Output, (), roi, original_data)
         
         # Reset the pixels we need to change (so we can use |= below)
@@ -354,12 +388,13 @@ class OpCompressedUserLabelArray(OpCompressedCache):
         original_data |= new_pixels
 
         # Replace 'eraser' values with zeros.
-        cleaned_data = numpy.where(original_data == self._eraser_magic_value, 0, original_data[:])
+        cleaned_data = original_data.copy()
+        cleaned_data[original_data == self._eraser_magic_value] = 0
 
         # Set in the cache (our superclass).
         super( OpCompressedUserLabelArray, self )._setInSlotInput( slot, subindex, roi, cleaned_data, store_zero_blocks=False )
         
-        # FIXME: Shouldn't this notification be triggered from within OpCompressedCache?
+        # FIXME: Shouldn't this notification be triggered from within OpUnmanagedCompressedCache?
         self.Output.setDirty( roi.start, roi.stop )
         
         return cleaned_data # Internal use: Return the cleaned_data        

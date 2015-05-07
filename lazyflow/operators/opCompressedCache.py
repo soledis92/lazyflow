@@ -20,10 +20,10 @@
 #		   http://ilastik.org/license/
 ###############################################################################
 # Built-in
-import copy
 import logging
 from functools import partial
 import collections
+import itertools
 import time
 
 # Third-party
@@ -34,29 +34,46 @@ import h5py
 from lazyflow.request import Request, RequestPool, RequestLock
 from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.roi import TinyVector, getIntersectingBlocks, getBlockBounds, roiToSlice, getIntersection
-from lazyflow.operators.opCache import OpCache
+from lazyflow.operators.opCache import ManagedBlockedCache
+from lazyflow.utility.chunkHelpers import chooseChunkShape
 
 logger = logging.getLogger(__name__)
 
-class OpCompressedCache(OpCache):
+
+def get_storage_size(h5dataset):
+    '''
+    get the storage size allocated for this hdf5 dataset in bytes
+
+    (shorthand for the hidden h5py functionality)
+    '''
+    return h5py.h5d.DatasetID.get_storage_size(h5dataset.id)
+
+class OpUnmanagedCompressedCache(Operator):
     """
     A blockwise cache that stores each block as a separate in-memory hdf5 file with a compressed dataset.
     
-    Note: It is not safe to call execute() change the blockshape simultaneously.
+    Note: This class is not managed by the memory manager, so there can be non-managed subclasses.
+          The "managed" version is OpCompressedCache, defined below.
+    
+    Note: 
+      * It is not safe to call execute() and change the blockshape
+        simultaneously.
+      * it is not safe to reuse this cache #FIXME
     """
-    Input = InputSlot() # Also used to asynchronously force data into the cache via __setitem__ (see setInSlot(), below()
+    Input = InputSlot(allow_mask=True) # Also used to asynchronously force data into the cache via __setitem__ (see setInSlot(), below()
     BlockShape = InputSlot(optional=True) # If not provided, the entire input is treated as one block
     
-    Output = OutputSlot() # Output as numpy arrays
+    Output = OutputSlot(allow_mask=True) # Output as numpy arrays
 
-    InputHdf5 = InputSlot(optional=True)
+    InputHdf5 = InputSlot(optional=True, allow_mask=True)
     CleanBlocks = OutputSlot() # A list of rois (tuples) of the blocks that are currently stored in the cache
-    OutputHdf5 = OutputSlot() # Provides data as hdf5 datasets.  Only allowed for rois that exactly match a block.
-    
+    OutputHdf5 = OutputSlot(allow_mask=True) # Provides data as hdf5 datasets.  Only allowed for rois that exactly match a block.
+
     def __init__(self, *args, **kwargs):
-        super( OpCompressedCache, self ).__init__( *args, **kwargs )
+        super( OpUnmanagedCompressedCache, self ).__init__( *args, **kwargs )
         self._lock = RequestLock()
         self._init_cache(None)
+        self._block_id_counter = itertools.count() # Used to ensure unique in-memory file names
 
     def _init_cache(self, new_blockshape):
         with self._lock:
@@ -65,11 +82,12 @@ class OpCompressedCache(OpCache):
             self._dirtyBlocks = set()
             self._blockLocks = {}
             self._chunkshape = self._chooseChunkshape(self._blockshape)
+            self._last_access_times = collections.defaultdict(float)
 
     def cleanUp(self):
         logger.debug( "Cleaning up" )
         self._closeAllCacheFiles()
-        super( OpCompressedCache, self ).cleanUp()
+        super( OpUnmanagedCompressedCache, self ).cleanUp()
 
 
     def setupOutputs(self):
@@ -150,10 +168,18 @@ class OpCompressedCache(OpCache):
             # Compute slicing within destination array and slicing within this block
             destination_relative_intersection = numpy.subtract(intersecting_roi, roi.start)
             block_relative_intersection = numpy.subtract(intersecting_roi, block_start)
+            destination_relative_intersection_slicing = roiToSlice(*destination_relative_intersection)
+            block_relative_intersection_slicing = roiToSlice( *block_relative_intersection )
             
             # Copy from block to destination
             dataset = self._getBlockDataset( entire_block_roi )
-            destination[ roiToSlice(*destination_relative_intersection) ] = dataset[ roiToSlice( *block_relative_intersection ) ]
+            if self.Output.meta.has_mask:
+                destination.data[ destination_relative_intersection_slicing ] = dataset["data"][ block_relative_intersection_slicing ]
+                destination.mask[ destination_relative_intersection_slicing ] = dataset["mask"][ block_relative_intersection_slicing ]
+                destination.fill_value = dataset["fill_value"][()]
+            else:
+                destination[ destination_relative_intersection_slicing ] = dataset[ block_relative_intersection_slicing ]
+            self._last_access_times[block_start] = time.time()
 
     def _executeCleanBlocks(self, destination):
         """
@@ -201,63 +227,42 @@ class OpCompressedCache(OpCache):
             self.Output.setDirty( slice(None) )
         else:
             assert False, "Unknown output slot"
-            
 
     def _chooseChunkshape(self, blockshape):
         """
         Choose an optimal chunkshape for our blockshape and Input shape.
+        We assume access patterns to vary more in space than in time or channel
+        and choose the inner chunk shape to be 100kiB slices of t and c.
+        Furthermore, we use the function
+          lazyflow.utility.chunkHelpers.chooseChunkShape()
+        to preserve the aspect ratio of the input (at least approximately).
         """
         if blockshape is None:
             return None
-        # Choose a chunkshape:
-        # - same time dimension as blockshape
-        # - same channel dimension as blockshape
-        # - aim for roughly 100k (for decent compression/decompression times)
-        # - aim for roughly the same ratio of xyz sizes as the blockshape
 
         # Start with a copy of blockshape
         axes = self.Output.meta.getTaggedShape().keys()
-        taggedBlockshape = collections.OrderedDict( zip(axes, self._blockshape) )
-        taggedChunkshape = copy.copy( taggedBlockshape )
+        taggedBlockShape = collections.OrderedDict(zip(axes, self._blockshape))
 
         dtypeBytes = self._getDtypeBytes(self.Output.meta.dtype)
 
-        # How much xyz space can a chunk occupy and still fit within 100k?
-        desiredSpace = 100000.0 / dtypeBytes
+        desiredSpace = 1024**2 / float(dtypeBytes)
+
+        # set t and c to 1
         for key in 'tc':
-            if key in taggedChunkshape:
-                desiredSpace /= taggedChunkshape[key] 
+            if key in taggedBlockShape:
+                taggedBlockShape[key] = 1 
         logger.debug("desired space: {}".format( desiredSpace ))
 
-        # How big is the blockshape?
-        blockshapeSpace = 1.0
-        numSpaceAxes = 0.0
-        for key in 'xyz':
-            if key in taggedBlockshape:
-                numSpaceAxes += 1.0
-                blockshapeSpace *= taggedBlockshape[key]
-        logger.debug("blockshape space: {}".format( blockshapeSpace ))
-        
-        # Determine factor to shrink each spatial dimension
-        factor = blockshapeSpace / float(desiredSpace)
-        factor = factor**(1/numSpaceAxes)
-        logger.debug("factor: {}".format(factor))
-        
-        # Adjust by factor
-        for key in 'xyz':
-            if key in taggedChunkshape:
-                taggedChunkshape[key] /= factor
-                taggedChunkshape[key] = max(1, taggedChunkshape[key])
-                taggedChunkshape[key] = int(taggedChunkshape[key])
-
-        chunkshape = taggedChunkshape.values()
-        
-        # h5py will crash if the chunkshape is larger than the dataset shape.
-        chunkshape = numpy.minimum(self._blockshape, chunkshape )
-
-        chunkshape = tuple( chunkshape )
-        logger.debug("Using chunk shape: {}".format( chunkshape ))
-        return chunkshape
+        # extract only the spatial shape
+        spatialKeys = [k for k in taggedBlockShape.keys() if k in 'xyz']
+        spatialShape = [taggedBlockShape[k] for k in spatialKeys]
+        newSpatialShape = chooseChunkShape(spatialShape, desiredSpace)
+        for k, v in zip(spatialKeys, newSpatialShape):
+            taggedBlockShape[k] = v
+        chunkShape = tuple(taggedBlockShape.values())
+        logger.debug("Using chunk shape: {}".format( chunkShape ))
+        return chunkShape
 
     def _getDtypeBytes(self, dtype):
         if type(dtype) is numpy.dtype:
@@ -267,21 +272,42 @@ class OpCompressedCache(OpCache):
         return dtype().nbytes
     
     def usedMemory(self):
-        #FIXME
-        tot = 0.0
-        for b in self._cacheFiles:
-            if "data" in b:
-                tot += b["data"].size * self._getDtypeBytes(b["data"].dtype)
+        tot, unc = self._usedMemory()
+        self._compression_factor = 1.0
+        if tot > 0:
+            self._compression_factor = unc/float(tot)
         return tot
-    
-    def generateReport(self, report):
-        report.name = self.name
-        report.fractionOfUsedMemoryDirty = self.fractionOfUsedMemoryDirty()
-        report.usedMemory = self.usedMemory()
-        report.lastAccessTime = self.lastAccessTime()
-        report.dtype = self.Output.meta.dtype
-        report.type = type(self)
-        report.id = id(self)
+
+    def _usedMemory(self):
+        tot = 0.0
+        unc = 0.0
+        for key in self._cacheFiles.keys():
+            real, virt = self._memoryForBlock(key)
+            tot += real
+            unc += virt
+        return tot, unc
+
+    def _memoryForBlock(self, key):
+        try:
+            group = self._cacheFiles[key]
+        except KeyError:
+            # entry was removed, ignore it
+            return 0
+        tot = 0
+        unc = 0
+        if "data" in group:
+            ds = group["data"]
+            # actual size
+            tot += get_storage_size(ds)
+            # uncompressed size
+            unc += ds.size * self._getDtypeBytes(ds.dtype)
+        if "mask" in group:
+            tot += group["mask"].size *\
+                self._getDtypeBytes(group["mask"].dtype)
+        if "fill_value" in group:
+            tot += group["fill_value"].size *\
+                self._getDtypeBytes(group["fill_value"].dtype)
+        return tot, unc
 
     def _getCacheFile(self, entire_block_roi):
         """
@@ -293,10 +319,11 @@ class OpCompressedCache(OpCache):
             return self._cacheFiles[block_start]
         with self._lock:
             if block_start not in self._cacheFiles:
-                # Create an in-memory hdf5 file with a unique name
+                # Create an in-memory hdf5 file with a unique name 
+                # (the counter ensures that even blocks that have been deleted previously get a unique name when they are re-created).
                 logger.debug("Creating a cache file for block: {}".format( list(block_start) ))
-                filename = str(id(self)) + str(id(self._cacheFiles)) + str(block_start)
-                mem_file = h5py.File(filename, driver='core', backing_store=False, mode='w')                
+                filename = str(id(self)) + str(id(self._cacheFiles)) + str(block_start) + str(self._block_id_counter.next())
+                mem_file = h5py.File(filename, driver='core', backing_store=False, mode='w')
 
                 # h5py will crash if the chunkshape is larger than the dataset shape.
                 datashape = tuple( entire_block_roi[1] - entire_block_roi[0] )
@@ -308,8 +335,19 @@ class OpCompressedCache(OpCache):
                                         shape=datashape,
                                         dtype=self.Output.meta.dtype,
                                         chunks=chunkshape,
-                                        compression='lzf' ) # lzf should be faster than gzip, 
+                                        compression='lzf' ) # lzf should be faster than gzip,
                                                             # with a slightly worse compression ratio
+                # Add mask information if needed.
+                if self.Output.meta.has_mask:
+                    mem_file.create_dataset('mask',
+                                            shape=datashape,
+                                            dtype=bool,
+                                            chunks=chunkshape,
+                                            compression='lzf' ) # lzf should be faster than gzip,
+                                                                # with a slightly worse compression ratio
+                    mem_file.create_dataset('fill_value',
+                                            shape=tuple(),
+                                            dtype=self.Output.meta.dtype )
 
                 self._blockLocks[block_start] = RequestLock()
                 self._cacheFiles[block_start] = mem_file
@@ -335,10 +373,17 @@ class OpCompressedCache(OpCache):
                     # We must use a temporary numpy array to hold the data.
                     data = self.Input(*entire_block_roi).wait()
                     block_file['data'][...] = data
+                    if self.Output.meta.has_mask:
+                        block_file['mask'][...] = data.mask
+                        block_file['fill_value'][...] = data.fill_value
                     
                     if logger.isEnabledFor(logging.DEBUG):
                         uncompressed_size = numpy.prod(data.shape) * self._getDtypeBytes(data.dtype)
                         storage_size = block_file["data"].id.get_storage_size()
+                        if 'mask' in block_file:
+                            storage_size += block_file["mask"].id.get_storage_size()
+                        if 'fill_value' in block_file:
+                            storage_size += block_file["fill_value"].id.get_storage_size()
                         logger.debug("Storage for block: {} is {}. ({}% of original)".format( block_start, storage_size, 100*storage_size/uncompressed_size ))
                     with self._lock:
                         self._dirtyBlocks.remove( block_start )
@@ -388,17 +433,42 @@ class OpCompressedCache(OpCache):
             # Compute slicing within source array and slicing within this block
             source_relative_intersection = numpy.subtract(intersecting_roi, roi.start)
             block_relative_intersection = numpy.subtract(intersecting_roi, block_start)
+            source_relative_intersection_slicing = roiToSlice( *source_relative_intersection )
+            block_relative_intersection_slicing = roiToSlice( *block_relative_intersection )
             
-            new_block_data = value[ roiToSlice(*source_relative_intersection) ]
-            if not store_zero_blocks and new_block_data.sum() == 0 and block_start not in self._cacheFiles:
+            new_block_data = value[ source_relative_intersection_slicing ]
+            new_block_sum = new_block_data.sum()
+            if not store_zero_blocks and new_block_sum == 0 and block_start not in self._cacheFiles:
                 # Special fast-path: If this block doesn't exist yet, 
-                #  don't bother creating if we're just going to fill it with zeros
-                # (Used by the OpCompressedUserLabelArray)
+                #  don't bother creating if we're just going to fill it with zeros.
+                # (This feature is used by the OpCompressedUserLabelArray)
                 pass
             else:
                 # Copy from source to block
                 dataset = self._getBlockDataset( entire_block_roi )
-                dataset[ roiToSlice( *block_relative_intersection ) ] = new_block_data
+                if self.Output.meta.has_mask:
+                    dataset["data"][ block_relative_intersection_slicing ] = new_block_data.data
+                    dataset["mask"][ block_relative_intersection_slicing ] = new_block_data.mask
+                    dataset["fill_value"][()] = new_block_data.fill_value
+
+                    # Untested. Write a test to use this.
+                    # # If we can, remove this block entirely.
+                    # if not store_zero_blocks and new_block_sum == 0 and (dataset["data"][:] == 0).all() and (dataset["mask"]).any() and (dataset["fill_value"] == 0).all():
+                    #     with self._lock:
+                    #         with self._blockLocks[block_start]:
+                    #            self._cacheFiles[block_start].close()
+                    #            del self._cacheFiles[block_start]
+                    #         del self._blockLocks[block_start]
+                else:
+                    dataset[ block_relative_intersection_slicing ] = new_block_data
+
+                    # If we can, remove this block entirely.
+                    if not store_zero_blocks and new_block_sum == 0 and (dataset[:] == 0).all():
+                        with self._lock:
+                            with self._blockLocks[block_start]:
+                               self._cacheFiles[block_start].close()
+                               del self._cacheFiles[block_start]
+                            del self._blockLocks[block_start]
     
             # Here, we assume that if this function is used to update ANY PART of a 
             #  block, he is responsible for updating the ENTIRE block.
@@ -411,7 +481,10 @@ class OpCompressedCache(OpCache):
 
     def _setInSlotInputHdf5(self, slot, subindex, roi, value):
         logger.debug("Setting block {} from hdf5".format( roi ))
-        assert isinstance( value, h5py.Dataset ), "InputHdf5 slot requires an hdf5 Dataset to copy from (not a numpy array)."
+        if self.Output.meta.has_mask:
+            assert isinstance( value, h5py.Group ), "InputHdf5 slot requires an hdf5 Group to copy from (not a numpy masked array)."
+        else:
+            assert isinstance( value, h5py.Dataset ), "InputHdf5 slot requires an hdf5 Dataset to copy from (not a numpy array)."
 
         block_roi = getBlockBounds( self.Output.meta.shape, self._blockshape, roi.start )
 
@@ -421,18 +494,43 @@ class OpCompressedCache(OpCache):
         if roi_is_exactly_one_block:
             cachefile = self._getCacheFile( block_roi )
             logger.debug( "Copying HDF5 data directly into block {}".format( block_roi ) )
-            assert cachefile['data'].dtype == value.dtype
-            assert cachefile['data'].shape == value.shape
-            del cachefile['data']
-            cachefile.copy( value, 'data' )
-    
+
+            if self.Output.meta.has_mask:
+                assert len(value) == 3
+
+                for each in ["data", "mask", "fill_value"]:
+                    assert each in value
+                    assert cachefile[each].dtype == value[each].dtype
+                    assert cachefile[each].shape == value[each].shape
+
+                for each in ["data", "mask", "fill_value"]:
+                    del cachefile[each]
+                    cachefile.copy( value[each], each )
+            else:
+                assert cachefile['data'].dtype == value.dtype
+                assert cachefile['data'].shape == value.shape
+                del cachefile['data']
+                cachefile.copy( value, 'data' )
+
             block_start = tuple(roi.start)
             self._dirtyBlocks.discard( block_start )
         else:
             # This hdf5 data does not correspond to exactly one block.
             # We must uncompress it and write it the "normal" way (the slow way)
             # FIXME: This would use less memory if we uncompressed the data block-by-block
-            self.Input[roiToSlice(roi.start, roi.stop)] = value[:]
+            data = None
+
+            if self.Output.meta.has_mask:
+                data = numpy.ma.masked_array(
+                    value["data"][()],
+                    mask=value["mask"][()],
+                    fill_value=value["fill_value"][()],
+                    shrink=False
+                )
+            else:
+                data = value[()]
+
+            self.Input[roiToSlice(roi.start, roi.stop)] = data
 
 #        self.Output._sig_value_changed()
 #        self.OutputHdf5._sig_value_changed()
@@ -444,7 +542,10 @@ class OpCompressedCache(OpCache):
         not a numpy array of its contents.
         """
         block_file = self._getCacheFile(entire_block_roi)
-        return block_file['data']
+        if self.Output.meta.has_mask:
+            return block_file['/']
+        else:
+            return block_file['data']
 
 
     def _closeAllCacheFiles(self):
@@ -457,53 +558,70 @@ class OpCompressedCache(OpCache):
             self._blockLocks = {}
             self._cacheFiles = {}
 
+class OpCompressedCache(OpUnmanagedCompressedCache, ManagedBlockedCache):
 
+    def __init__(self, *args, **kwargs):
+        super(OpCompressedCache, self).__init__(*args, **kwargs)
+        # Now that we're initialized, it's safe to register with the memory manager
+        self.registerWithMemoryManager()
 
+    def fractionOfUsedMemoryDirty(self):
+        tot = 0.0
+        dirty = 0.0
+        for key in self._cacheFiles.keys():
+            real, virt = self._memoryForBlock(key)
+            tot += real
+            if key in self._dirtyBlocks:
+                dirty += real
+        if tot > 0:
+            return dirty / tot
+        else:
+            return 0.0
+    
+    def generateReport(self, report):
+        super(OpCompressedCache, self).generateReport(report)
+        report.dtype = self.Output.meta.dtype
+        f = self._compression_factor
+        report.info = "Compression factor: {:.2f}".format(f)
 
+    def freeMemory(self):
+        mem = self.usedMemory()
+        self._closeAllCacheFiles()
+        with self._lock:
+            self._cacheFiles = {}
+            self._dirtyBlocks = set()
+        return mem
 
+    def freeDirtyMemory(self):
+        dirty = 0.0
+        for key in self._cacheFiles.keys():
+            if key in self._dirtyBlocks:
+                dirty += self.freeBlock(key)
+                with self._lock:
+                    self._dirtyBlocks.discard(key)
+        return dirty
 
+    def freeBlock(self, block_id):
+        if block_id not in self._blockLocks:
+            return 0
+        with self._blockLocks[block_id]:
+            try:
+                f = self._cacheFiles[block_id]
+            except KeyError:
+                # this file was deleted
+                return 0
+            if "data" not in f:
+                return 0
+            ds = f["data"]
+            # use actual size, not number of bytes in
+            # *uncompressed* array
+            mem = get_storage_size(ds)
+            f.close()
+            del self._cacheFiles[block_id]
+            del self._last_access_times[block_id]
+            return mem
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    def getBlockAccessTimes(self):
+        # FIXME
+        return [(key, self._last_access_times[key])
+                for key in self._last_access_times]

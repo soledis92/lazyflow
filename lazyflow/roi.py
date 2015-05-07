@@ -30,9 +30,9 @@ if __name__ == "__main__":
     sys.path.pop(0)
 
 import numpy
-from numpy.lib.stride_tricks import as_strided as ast
 from math import ceil, floor, pow, log10
 import collections
+from functools import partial
 
 class TinyVector(list):
     __slots__ = []
@@ -322,31 +322,116 @@ def roiToSlice(start, stop, hardBind=False):
     else:
         return tuple(map(rTsl1,start,stop))
 
+def nonzero_bounding_box(data):
+    """
+    For an array with sparsely distributed non-zero values,
+      find the bounding box (a ROI) of the non-zero values.
 
-def extendSlice(start, stop, shape, sigma, window = 3.5):
-    # TODO: Rename this function, since it doesn't use slice() objects.
-    zeros = start - start
+    Example:    
+        >>> data = numpy.zeros( (10,100,100) )
+        >>> data[4, 30:40, 50:60] = 1
+        >>> data[7, 45:55, 30:35] = 255
+        >>> nonzero_bounding_box(data)
+        array([[ 4, 30, 30],
+               [ 8, 55, 60]])
+
+    """
+    nonzero_coords = numpy.nonzero(data)
+    if len(nonzero_coords[0]) == 0:
+        block_bounding_box_roi = numpy.array( ([0]*data.ndim, [0]*data.ndim) )
+    else:
+        block_bounding_box_roi = numpy.array( [ map( numpy.min, nonzero_coords ),
+                                                map( numpy.max, nonzero_coords ) ] )
+        block_bounding_box_roi[1,:] += 1
+    return block_bounding_box_roi
+
+def containing_rois(rois, inner_roi):
+    """
+    Given a list of rois and an "inner roi" which may or may not be fully 
+    contained within some of the rois from the list,
+    return the subset of rois that entirely envelop the given inner roi.
+    
+    Example:
+        >>> rois = [([0,0,0], [10,10,10]),
+        ...         ([5,3,2], [11,12,13]),
+        ...         ([4,6,4], [5,9,9])]        
+        >>> containing_rois( rois, ( [4,7,6], [5,8,8] ) )
+        array([[[ 0,  0,  0],
+                [10, 10, 10]],
+        <BLANKLINE>
+               [[ 4,  6,  4],
+                [ 5,  9,  9]]])
+    """
+    if not rois:
+        return numpy.array([])
+    rois = numpy.asarray(rois)
+    left_matches = (rois[:,0] <= inner_roi[0])
+    right_matches = (rois[:,1] >= inner_roi[1])
+    both_matches = numpy.logical_and(left_matches, right_matches)
+    matching_rows = numpy.logical_and.reduce(both_matches, axis=1).nonzero()
+    return rois[matching_rows]
+
+def enlargeRoiForHalo(start, stop, shape, sigma, window=3.5, enlarge_axes=None, return_result_roi=False):
+    """
+    Enlarge the given roi (start,stop) with a halo according to the given 
+    sigma and window size, without exceeding the given total image shape given.
+    
+    Except for clipping near the image borders, the halo on all sides of the 
+    image will have width = sigma*window
+    
+    start: ROI start coordinate
+    stop: ROI stop coordinate
+    shape: Total shape of the image (not to be exceeded)
+    sigma: The sigma of the filter.
+    window: The window size, expressed in units of sigma.
+    enlarge_axes: If provided, indicates which axes to expand with the halo.
+                  Should be a list of bools (or 1/0 values). 
+                  For example, halo_axes=(0,1,1,1,0) means: "enlarge roi for axes 1,2,3 but not axes 0,4"
+    return_result_roi: If True, also return the "result roi".  
+                       That is, the roi which you can use to extract the inner data 
+                       from an array retrieved using the enlarged roi.
+                       For example:
+                           roi_with_halo, result_roi = enlargeRoiForHalo(start, stop, sigma, return_result_roi=True)
+                           outer_data = myfilter(roi_with_halo)
+                           data_without_halo = outer_data[roiToSlice(result_roi)]
+                           assert data_without_halo.shape == stop - start
+    """
+    assert len(start) == len(stop) == len(shape)
+    shape = TinyVector(shape)
+    if enlarge_axes is None:
+        enlarge_axes = TinyVector((1,)*len(start))
+    else:
+        enlarge_axes = TinyVector(enlarge_axes)*1
+    
+    # non-enlarged axes are zero'd out while we enlarge the rest.
+    assert len(enlarge_axes) == len(shape)
+    max_spatial_shape = enlarge_axes*shape
+    spatial_start = enlarge_axes*start
+    spatial_stop = enlarge_axes*stop
+
     if isinstance( sigma, collections.Iterable ):
         sigma = TinyVector(sigma)
     if isinstance( start, collections.Iterable ):
         ret_type = type(start[0])
     else:
         ret_type = type(start)
-    newStart = numpy.maximum(start - numpy.ceil(window * sigma), zeros).astype( ret_type )
-    sa = numpy.array(shape)
-    newStop = numpy.minimum(stop + numpy.ceil(window * sigma), sa).astype( ret_type )
-    return newStart, newStop
 
+    zeros = TinyVector(start) - start
 
-def block_view(A, block= (3, 3)):
-    """Provide a 2D block view to 2D array. No error checking made.
-    Therefore meaningful (as implemented) only for blocks strictly
-    compatible with the shape of A."""
-    # simple shape and strides computations may seem at first strange
-    # unless one is able to recognize the 'tuple additions' involved ;-)
-    shape= (A.shape[0]/ block[0], A.shape[1]/ block[1])+ block
-    strides= (block[0]* A.strides[0], block[1]* A.strides[1])+ A.strides
-    return ast(A, shape= shape, strides= strides)
+    enlarged_start = numpy.maximum(spatial_start - numpy.ceil(window * sigma), zeros).astype( ret_type )
+    enlarged_stop = numpy.minimum(spatial_stop + numpy.ceil(window * sigma), max_spatial_shape).astype( ret_type )
+    
+    # Restore non-halo elements exactly as they were
+    enlarged_start += (enlarge_axes == 0) * start
+    enlarged_stop += (enlarge_axes == 0) * stop
+    
+    enlarged_roi = numpy.array((enlarged_start, enlarged_stop))
+    if return_result_roi:
+        inner_roi = numpy.asarray( (start, stop) )
+        result_roi = inner_roi - enlarged_roi[0]
+        return enlarged_roi, result_roi
+    else:
+        return enlarged_roi 
 
 def getIntersectingBlocks( blockshape, roi, asarray=False ):
     """
@@ -354,6 +439,8 @@ def getIntersectingBlocks( blockshape, roi, asarray=False ):
     By default, returned as an array of shape (N,M) (N indexes with M coordinates each).
     If asarray=True, then the blocks are returned as an array of shape (D1,D2,D3,...DN,M)
     such that coordinates of spatially adjacent blocks are returned in adjacent entries of the array.
+
+    (SEE ALSO: ``lazyflow.utility.blockwise_view``)
 
     For example:
 
@@ -427,6 +514,17 @@ def getIntersectingBlocks( blockshape, roi, asarray=False ):
         num_indexes = numpy.prod(block_indices.shape[0:-1])
         axiscount = block_indices.shape[-1]
         return numpy.reshape( block_indices, (num_indexes, axiscount) )
+
+def getIntersectingRois(dataset_shape, blockshape, roi, clip_blocks_to_roi=True):
+    block_starts = getIntersectingBlocks(blockshape, roi)
+    block_rois = map( partial(getBlockBounds, dataset_shape, blockshape), block_starts )
+    if clip_blocks_to_roi:
+        block_rois = map( lambda block_roi: getIntersection(block_roi, roi), block_rois )
+    return block_rois
+
+def is_fully_contained( inner_roi, outer_roi ):
+    inner_roi = numpy.asarray(inner_roi)
+    return (inner_roi[0] >= outer_roi[0]).all() and (inner_roi[1] <= outer_roi[1]).all()
 
 def getBlockBounds(dataset_shape, block_shape, block_start):
     """

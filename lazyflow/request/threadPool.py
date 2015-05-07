@@ -25,125 +25,15 @@ import collections
 import heapq
 import threading
 import platform
-import psutil
 import time
 import os
+import ctypes
+
+import psutil
+
+from lazyflow.utility.priorityQueue import PriorityQueue
 
 
-# This module's code needs to be sanitized if you're not using CPython.
-# In particular, check that deque operations like push() and pop() are still atomic.
-assert platform.python_implementation() == "CPython"
-
-class PriorityQueue(object):
-    """
-    Simple threadsafe heap based on the python heapq module.
-    """
-    def __init__(self):
-        self._heap = []
-        self._lock = threading.Lock()
-
-    def push(self, item):
-        with self._lock:
-            heapq.heappush(self._heap, item)
-    
-    def pop(self):
-        with self._lock:
-            return heapq.heappop(self._heap)
-    
-    def __len__(self):
-        return len(self._heap)
-
-class FifoQueue(object):
-    """
-    Simple FIFO queue based on collections.deque.
-    """
-    def __init__(self):
-        self._deque = collections.deque() # Documentation says this is threadsafe for push and pop
-
-    def push(self, item):
-        self._deque.append(item)
-    
-    def pop(self):
-        return self._deque.popleft()
-    
-    def __len__(self):
-        return len(self._deque)
-
-class LifoQueue(object):
-    """
-    Simple LIFO queue based on collections.deque.
-    """
-    def __init__(self):
-        self._deque = collections.deque() # Documentation says this is threadsafe for push and pop
-
-    def push(self, item):
-        self._deque.append(item)
-    
-    def pop(self):
-        return self._deque.pop()
-    
-    def __len__(self):
-        return len(self._deque)
-
-
-class MemoryWatcher(threading.Thread):
-    """
-    Background thread for checking memory usage
-    """
-    
-    def __init__(self, thread_pool):
-        threading.Thread.__init__(self)
-        self.process = psutil.Process(os.getpid())
-        self.usage = self.process.memory_percent()
-        self.tasks = FifoQueue()
-        self.thread_pool = thread_pool
-        self.threshold = 85 # threshold at which to 
-        self.threshold_reached = False
-        self.stopped = False
-        self.daemon = True
-        
-    def run(self):
-        """
-        Computes memory usage every 0.1 second.
-        Flushes queued tasks, if memory usage is below a threshold.
-        """
-        while self.stopped is False:
-            self.usage = self.process.memory_percent()
-            if self.usage < self.threshold:
-                self.flush()
-            time.sleep(0.1)
-            
-    def filter(self, task):
-        """
-        See if a task needs to be queued due to high memory usages.
-        """
-        if self.usage > self.threshold and len(task._priority) == 1:
-            if self.threshold_reached is False:
-                print "MemoryWatcher: memory usage above %f%% filtering task." % (self.threshold,)
-                self.threshold_reached = True
-            self.tasks.push(task)
-            raise IndexError
-        return task
-            
-    def flush(self):
-        """
-        Flush all queued tasks back to the threadpool.
-        """
-        if len(self.tasks) > 0:
-            if self.threshold_reached is True:
-                print "MemoryWatcher: memory usage below %f%%. Flushing queued tasks ..." % (self.threshold,)
-                self.threshold_reached = False
-                
-        while len(self.tasks) > 0:
-            task = self.tasks.pop()
-            self.thread_pool.wake_up(task)
-            
-    def stop(self):
-        """
-        stop the MemoryWatcher
-        """
-        self.stopped = True
-   
 class ThreadPool(object):
     """
     Manages a set of worker threads and dispatches tasks to them.
@@ -196,6 +86,9 @@ class ThreadPool(object):
         
         for w in self.workers:
             w.join()
+    
+    def get_states(self):
+        return [w.state for w in self.workers]
     
     def _start_workers(self, num_workers, queue_type):
         """
@@ -253,23 +146,28 @@ class _Worker(threading.Thread):
         self.stopped = False
         self.job_queue_condition = threading.Condition()
         self.job_queue = queue_type()
+        self.state = 'initialized'
         
     def run(self):
         """
         Keep executing available tasks until we're stopped.
         """
         # Try to get some work.
+        self.state = 'waiting'
         next_task = self._get_next_job()
 
         while not self.stopped:
             # Start (or resume) the work by switching to its greenlet
+            self.state = 'running task'
             next_task()
 
             # We're done with this request.
             # Free it immediately for garbage collection.
+            self.state = 'freeing task'
             next_task = None
 
             # Now try to get some work (wait if necessary).
+            self.state = 'waiting'
             next_task = self._get_next_job()
 
     def stop(self):
@@ -336,3 +234,32 @@ class _Worker(threading.Thread):
                                         #  members (e.g. .assigned_worker) to be "monkey-patched" onto it.  You may have to wrap it in a custom class first.
             return task
     
+    def raise_exc(self, excobj):
+        """
+        I HAVEN'T TESTED THIS YET.  (But it looks useful.)
+        http://code.activestate.com/recipes/496960-thread2-killable-threads
+
+        Debugging method.
+        Asynchronously raise an exception in this thread.
+        See docstring for _async_raise() for more details.
+        """
+        assert self.isAlive(), "thread must be started"
+        for tid, tobj in threading._active.items():
+            if tobj is self:
+                _Worker._async_raise(tid, excobj)
+                return
+
+    @staticmethod
+    def _async_raise(tid, excobj):
+        """
+        Raise an exception in the thread with the given id.
+        http://code.activestate.com/recipes/496960-thread2-killable-threads
+        """
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, ctypes.py_object(excobj))
+        if res == 0:
+            raise ValueError("nonexistent thread id")
+        elif res > 1:
+            # """if it returns a number greater than one, you're in trouble, 
+            # and you should call it again with exc=NULL to revert the effect"""
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, 0)
+            raise SystemError("PyThreadState_SetAsyncExc failed")

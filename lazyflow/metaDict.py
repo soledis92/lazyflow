@@ -162,7 +162,7 @@ class MetaDict(defaultdict):
         """
         pairs = []
         # For easy comparison, start with these in the same order every time.
-        standard_keys = ['_ready', 'NOTREADY', 'shape', 'axistags', 'dtype', 'drange', '_dirty' ]
+        standard_keys = ['_ready', 'NOTREADY', 'shape', 'axistags', 'dtype', 'drange', 'has_mask', '_dirty' ]
         for key in standard_keys:
             if key in self:
                 pairs.append( key + ' : ' + repr(self[key]) )
@@ -174,4 +174,4 @@ class MetaDict(defaultdict):
         return "{" + ", ".join(pairs) + "}"
                 
     def __repr__(self):
-        return self.__str__(self)
+        return self.__str__()

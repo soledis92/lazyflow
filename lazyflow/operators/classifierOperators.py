@@ -29,7 +29,8 @@ import numpy
 
 #lazyflow
 from lazyflow.graph import Operator, InputSlot, OutputSlot, OrderedSignal, OperatorWrapper
-from lazyflow.roi import sliceToRoi, roiToSlice, getIntersection, roiFromShape
+from lazyflow.roi import sliceToRoi, roiToSlice, getIntersection, roiFromShape, nonzero_bounding_box, enlargeRoiForHalo
+from lazyflow.utility import Timer
 from lazyflow.classifiers import LazyflowVectorwiseClassifierABC, LazyflowVectorwiseClassifierFactoryABC, \
                                  LazyflowPixelwiseClassifierABC, LazyflowPixelwiseClassifierFactoryABC
 
@@ -141,40 +142,56 @@ class OpTrainPixelwiseClassifierBlocked(Operator):
         for image_slot, label_slot, nonzero_block_slot in zip(self.Images, self.Labels, self.nonzeroLabelBlocks):
             block_slicings = nonzero_block_slot.value
             for block_slicing in block_slicings:
-                block_label_roi = sliceToRoi( block_slicing, image_slot.meta.shape )
-
-                # Ask for the halo needed by the classifier
-                axiskeys = image_slot.meta.getAxisKeys()
-                halo_shape = classifier_factory.get_halo_shape(axiskeys)
-                assert len(halo_shape) == len( block_label_roi[0] )
-                assert halo_shape[-1] == 0, "Didn't expect a non-zero halo for channel dimension."
-
-                # Expand block by halo, then clip to image bounds
-                block_label_roi = numpy.array( block_label_roi )
-                block_label_roi[0] -= halo_shape
-                block_label_roi[1] += halo_shape
-                block_label_roi = getIntersection( block_label_roi, roiFromShape(image_slot.meta.shape) )
-
-                block_image_roi = numpy.array( block_label_roi )
-                assert (block_image_roi[:, -1] == [0,1]).all()
-                num_channels = image_slot.meta.shape[-1]
-                block_image_roi[:, -1] = [0, num_channels]
-
-                # Ensure the results are plain ndarray, not VigraArray, 
-                #  which some classifiers might have trouble with.
-                block_label_data = numpy.asarray( label_slot(*block_label_roi).wait() )
-                block_image_data = numpy.asarray( image_slot(*block_image_roi).wait() )
+                # Get labels
+                block_label_roi = sliceToRoi( block_slicing, label_slot.meta.shape )
+                block_label_data = label_slot(*block_label_roi).wait()
                 
-                label_data_blocks.append( block_label_data )
-                image_data_blocks.append( block_image_data )
-                
-        logger.debug("Training new classifier: {}".format( classifier_factory.description ))
-        classifier = classifier_factory.create_and_train_pixelwise( image_data_blocks, label_data_blocks )
-        assert issubclass(type(classifier), LazyflowPixelwiseClassifierABC), \
-            "Classifier is of type {}, which does not satisfy the LazyflowPixelwiseClassifierABC interface."\
-            "".format( type(classifier) )
-        result[0] = classifier
-        return result
+                # Shrink roi to bounding box of actual label pixels
+                bb_roi_within_block = nonzero_bounding_box(block_label_data)
+                block_label_bb_roi = bb_roi_within_block + block_label_roi[0]
+
+                # Double-check that there is at least 1 non-zero label in the block.
+                if (block_label_bb_roi[1] > block_label_bb_roi[0]).all():
+                    # Ask for the halo needed by the classifier
+                    axiskeys = image_slot.meta.getAxisKeys()
+                    halo_shape = classifier_factory.get_halo_shape(axiskeys)
+                    assert len(halo_shape) == len( block_label_roi[0] )
+                    assert halo_shape[-1] == 0, "Didn't expect a non-zero halo for channel dimension."
+    
+                    # Expand block by halo, but keep clipped to image bounds
+                    padded_label_roi, bb_roi_within_padded = enlargeRoiForHalo( *block_label_bb_roi, 
+                                                                                shape=label_slot.meta.shape,
+                                                                                sigma=halo_shape,
+                                                                                window=1,
+                                                                                return_result_roi=True )
+                    
+                    # Copy labels to new array, which has size == bounding-box + halo
+                    padded_label_data = numpy.zeros( padded_label_roi[1] - padded_label_roi[0], label_slot.meta.dtype )                
+                    padded_label_data[roiToSlice(*bb_roi_within_padded)] = block_label_data[roiToSlice(*bb_roi_within_block)]
+    
+                    padded_image_roi = numpy.array( padded_label_roi )
+                    assert (padded_image_roi[:, -1] == [0,1]).all()
+                    num_channels = image_slot.meta.shape[-1]
+                    padded_image_roi[:, -1] = [0, num_channels]
+    
+                    # Ensure the results are plain ndarray, not VigraArray, 
+                    #  which some classifiers might have trouble with.
+                    padded_image_data = numpy.asarray( image_slot(*padded_image_roi).wait() )
+                    
+                    label_data_blocks.append( padded_label_data )
+                    image_data_blocks.append( padded_image_data )
+
+        if len(image_data_blocks) == 0:
+            result[0] = None
+        else:
+            axistags = self.Images[0].meta.axistags
+            logger.debug("Training new classifier: {}".format( classifier_factory.description ))
+            classifier = classifier_factory.create_and_train_pixelwise( image_data_blocks, label_data_blocks, axistags )
+            result[0] = classifier
+            if classifier is not None:
+                assert issubclass(type(classifier), LazyflowPixelwiseClassifierABC), \
+                    "Classifier is of type {}, which does not satisfy the LazyflowPixelwiseClassifierABC interface."\
+                    "".format( type(classifier) )
 
     def propagateDirty(self, slot, subindex, roi):
         self.Classifier.setDirty()
@@ -276,12 +293,12 @@ class OpTrainClassifierFromFeatureVectors(Operator):
 
         logger.debug("Training new classifier: {}".format( classifier_factory.description ))
         classifier = classifier_factory.create_and_train( featMatrix, labelsMatrix[:,0] )
-        assert issubclass(type(classifier), LazyflowVectorwiseClassifierABC), \
-            "Classifier is of type {}, which does not satisfy the LazyflowVectorwiseClassifierABC interface."\
-            "".format( type(classifier) )
-
         result[0] = classifier
-        
+        if classifier is not None:
+            assert issubclass(type(classifier), LazyflowVectorwiseClassifierABC), \
+                "Classifier is of type {}, which does not satisfy the LazyflowVectorwiseClassifierABC interface."\
+                "".format( type(classifier) )        
+
         self.trainingCompleteSignal()
         return result
 
@@ -426,7 +443,8 @@ class OpPixelwiseClassifierPredict(Operator):
 
         # Request the data
         input_data = self.Image(*upstream_roi).wait()
-        probabilities = classifier.predict_probabilities_pixelwise( input_data )
+        axistags = self.Image.meta.axistags
+        probabilities = classifier.predict_probabilities_pixelwise( input_data, axistags )
         
         # We're expecting a channel for each label class.
         # If we didn't provide at least one sample for each label,
@@ -531,12 +549,18 @@ class OpVectorwiseClassifierPredict(Operator):
         newKey = key[:-1]
         newKey += (slice(0,self.Image.meta.shape[-1],None),)
 
-        input_data = self.Image[newKey].wait()
+        with Timer() as features_timer:
+            input_data = self.Image[newKey].wait()
+        
         shape=input_data.shape
         prod = numpy.prod(shape[:-1])
         features = input_data.reshape((prod, shape[-1]))
 
-        probabilities = classifier.predict_probabilities( features )
+        with Timer() as prediction_timer:
+            probabilities = classifier.predict_probabilities( features )
+
+        logger.debug( "Features took {} seconds, Prediction took {} seconds for roi: {} : {}"\
+                      .format( features_timer.seconds(), prediction_timer.seconds(), roi.start, roi.stop ) )
 
         assert probabilities.shape[1] <= self.PMaps.meta.shape[-1], \
             "Error: Somehow the classifier has more label classes than expected:"\

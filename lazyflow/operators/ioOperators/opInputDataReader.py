@@ -98,7 +98,7 @@ class OpInputDataReader(Operator):
         TODO: Handle datasets of non-standard (non-5d) dimensions.
         """
         filePath = self.FilePath.value
-        assert type(filePath) == str, "Error: filePath is not of type str.  It's of type {}".format(type(filePath))
+        assert isinstance(filePath, (str,unicode)), "Error: filePath is not of type str.  It's of type {}".format(type(filePath))
 
         # Does this look like a relative path?
         useRelativePath = not isUrl(filePath) and not os.path.isabs(filePath)
@@ -121,10 +121,10 @@ class OpInputDataReader(Operator):
         if self._file is not None:
             self._file.close()
 
-        openFuncs = [ self._attemptOpenAsStack,
+        openFuncs = [ self._attemptOpenAsDvidVolume,
+                      self._attemptOpenAsStack,
                       self._attemptOpenAsHdf5,
                       self._attemptOpenAsNpy,
-                      self._attemptOpenAsDvidVolume,
                       self._attemptOpenAsBlockwiseFileset,
                       self._attemptOpenAsRESTfulBlockwiseFileset,
                       self._attemptOpenAsTiledVolume,
@@ -166,7 +166,7 @@ class OpInputDataReader(Operator):
         self.Output.connect( self.opInjector.Output )
     
     def _attemptOpenAsStack(self, filePath):
-        if '*' in filePath:
+        if '*' in filePath or os.path.pathsep in filePath:
             stackReader = OpStackLoader(parent=self)
             stackReader.globstring.setValue(filePath)
             return (stackReader, stackReader.stack)

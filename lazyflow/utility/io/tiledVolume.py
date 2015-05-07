@@ -1,7 +1,6 @@
 import os
 import numpy
 import vigra
-import shutil
 from functools import partial
 from StringIO import StringIO
 
@@ -73,7 +72,10 @@ class TiledVolume(object):
         "tile_url_format" : FormattedField( requiredFields=[],
                                             optionalFields=["x_start", "y_start", "z_start",
                                                             "x_stop",  "y_stop",  "z_stop",
-                                                            "x_index", "y_index", "z_index"] ),
+                                                            "x_index", "y_index", "z_index",
+                                                            "raveler_z_base"] ), # Special keyword for Raveler session directories.  See notes below.
+        
+        "invert_y_axis" : bool, # For raveler volumes, the y-axis coordinate is inverted.
         
         # A list of lists, mapping src slices to destination slices (for "filling in" missing slices)
         # Example If slices 101,102,103 are missing data, you might want to simply repeat the data from slice 100:
@@ -190,35 +192,7 @@ class TiledVolume(object):
             # Get a view to the output slice
             result_region = result_out[roiToSlice(*destination_relative_intersection)]
             
-            # Special feature: 
-            # Some slices are missing, in which case we provide fake data from a different slice.
-            # Overwrite the rest args to pull data from an alternate source tile.
-            z_start = tile_roi_in[0][0]
-            if z_start in self._slice_remapping:
-                new_source_slice = self._slice_remapping[z_start]
-                tile_roi_in[0][0] = new_source_slice
-                tile_roi_in[1][0] = new_source_slice+1
-
-            tile_index = numpy.array(tile_roi_in[0]) / tile_blockshape
-            rest_args = { 'z_start' : tile_roi_in[0][0],
-                          'z_stop'  : tile_roi_in[1][0],
-                          'y_start' : tile_roi_in[0][1],
-                          'y_stop'  : tile_roi_in[1][1],
-                          'x_start' : tile_roi_in[0][2],
-                          'x_stop'  : tile_roi_in[1][2],
-                          'z_index' : tile_index[0],
-                          'y_index' : tile_index[1],
-                          'x_index' : tile_index[2] }
-
-            # Apply special z_translation_function
-            if self.description.z_translation_function is not None:
-                z_update_func = eval(self.description.z_translation_function)
-                rest_args['z_index'] = rest_args['z_start'] = z_update_func(rest_args['z_index'])
-                rest_args['z_stop'] = 1 + rest_args['z_start']
-
-            # Quick sanity check
-            assert rest_args['z_index'] == rest_args['z_start']
-
+            rest_args = self._get_rest_args(tile_blockshape, tile_roi_in)
             if self.description.tile_url_format.startswith('http'):
                 retrieval_fn = partial( self._retrieve_remote_tile, rest_args, tile_relative_intersection, result_region )
             else:
@@ -235,13 +209,66 @@ class TiledVolume(object):
             with Timer() as timer:
                 pool.wait()
             logger.info("Loading {} tiles took a total of {}".format( len(tile_starts), timer.seconds() ))
+
+    def _get_rest_args(self, tile_blockshape, tile_roi_in):
+        """
+        For a single tile, return a dict of all possible parameters that can be substituted 
+        into the tile_url_format string from the volume json description file.
         
+        tile_blockshape: The 3D blockshape of the tile 
+                         (since tiles are only 1 slice thick, the blockshape always begins with 1).
+        tile_roi_in: The ROI within the total volume for a particular tile.
+                     (Note that the size of the ROI is usually, but not always, the same as tile_blockshape.
+                     Near the volume borders, the tile_roi_in may be smaller.)
+        """
+        # Special feature: 
+        # Some slices are missing, in which case we provide fake data from a different slice.
+        # Overwrite the rest args to pull data from an alternate source tile.
+        z_start = tile_roi_in[0][0]
+        if z_start in self._slice_remapping:
+            new_source_slice = self._slice_remapping[z_start]
+            tile_roi_in[0][0] = new_source_slice
+            tile_roi_in[1][0] = new_source_slice+1
+
+        tile_index = numpy.array(tile_roi_in[0]) / tile_blockshape
+        rest_args = { 'z_start' : tile_roi_in[0][0],
+                      'z_stop'  : tile_roi_in[1][0],
+                      'y_start' : tile_roi_in[0][1],
+                      'y_stop'  : tile_roi_in[1][1],
+                      'x_start' : tile_roi_in[0][2],
+                      'x_stop'  : tile_roi_in[1][2],
+                      'z_index' : tile_index[0],
+                      'y_index' : tile_index[1],
+                      'x_index' : tile_index[2] }
+
+        # Apply special z_translation_function
+        if self.description.z_translation_function is not None:
+            z_update_func = eval(self.description.z_translation_function)
+            rest_args['z_index'] = rest_args['z_start'] = z_update_func(rest_args['z_index'])
+            rest_args['z_stop'] = 1 + rest_args['z_start']
+
+        # Quick sanity check
+        assert rest_args['z_index'] == rest_args['z_start']
+
+        # Special arg for Raveler session directories:
+        # For files with Z < 1000, no extra directory level
+        # For files with Z >= 1000, there is an extra directory level,
+        #  in which case the extra '/' is INCLUDED here in the rest arg.
+        raveler_z_base = (rest_args['z_index'] // 1000) * 1000
+        if raveler_z_base == 0:
+            rest_args['raveler_z_base'] = ""
+        else:
+            rest_args['raveler_z_base'] = str(raveler_z_base) + '/'
+
+        return rest_args
+
     def _retrieve_local_tile(self, rest_args, tile_relative_intersection, data_out):
         tile_path = self.description.tile_url_format.format( **rest_args )
         logger.debug("Opening {}".format( tile_path ))
 
         if not os.path.exists(tile_path):
             logger.error("Tile does not exist: {}".format( tile_path ))
+            data_out[...] = 0
             return
 
         # Read the image from the disk with vigra
@@ -255,7 +282,12 @@ class TiledVolume(object):
         
         # img has axes xyc, but we want zyx
         img = img.transpose()[None,0,:,:]
-    
+
+        if self.description.invert_y_axis:
+            # More special Raveler support:
+            # Raveler's conventions for the Y-axis are the reverse for everyone else's.
+            img = img[:, ::-1, :]
+
         # Copy just the part we need into the destination array
         assert img[roiToSlice(*tile_relative_intersection)].shape == data_out.shape
         data_out[:] = img[roiToSlice(*tile_relative_intersection)]
@@ -292,7 +324,9 @@ class TiledVolume(object):
             tries = 0
             while not success:
                 try:
-                    r = self._session.get(tile_url)
+                    # Note: We give timeout as a tuple, which requires a recent version of requests.
+                    #       If you get an exception about that, upgrade your requests module.
+                    r = self._session.get(tile_url, timeout=(3.0, 20.0))
                     success = True
                 except requests.ConnectionError:
                     # This special 'pass' is here because we keep running into exceptions like this: 
@@ -310,7 +344,7 @@ class TiledVolume(object):
             if self.TEST_MODE:
                 import time
                 time.sleep(0.01)
-                r = self._session.get(tile_url)
+                r = self._session.get(tile_url, timeout=(3.0, 20.0))
             else:
                 raise
                 
@@ -334,6 +368,11 @@ class TiledVolume(object):
                                   "If it is RGB, be sure to set the is_rgb flag in your description json."
             # img has axes xy, but we want zyx
             img = img[None]
+
+            if self.description.invert_y_axis:
+                # More special Raveler support:
+                # Raveler's conventions for the Y-axis are the reverse for everyone else's.
+                img = img[:, ::-1, :]
         
             # Copy just the part we need into the destination array
             assert img[roiToSlice(*tile_relative_intersection)].shape == data_out.shape
@@ -366,3 +405,4 @@ class TiledVolume(object):
         session.mount('http://', adapter)
         session.mount('https://', adapter2)
         return session
+
