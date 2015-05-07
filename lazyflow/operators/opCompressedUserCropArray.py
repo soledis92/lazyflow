@@ -29,7 +29,6 @@ import numpy
 # Lazyflow
 from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.roi import TinyVector, getIntersectingBlocks, getBlockBounds, roiToSlice, getIntersection, roiFromShape
-from lazyflow.operators.opCache import OpCache
 from lazyflow.operators.opCompressedCache import OpCompressedCache
 from lazyflow.rtype import SubRegion
 
