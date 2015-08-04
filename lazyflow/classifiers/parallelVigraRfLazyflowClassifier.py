@@ -7,6 +7,7 @@ import numpy
 import vigra
 import h5py
 
+from lazyflow.utility import Timer
 from lazyflow.request import Request, RequestPool, RequestLock
 from lazyflowClassifier import LazyflowVectorwiseClassifierABC, LazyflowVectorwiseClassifierFactoryABC
 
@@ -38,6 +39,7 @@ class ParallelVigraRfLazyflowClassifierFactory(LazyflowVectorwiseClassifierFacto
         tree_counts[:self._num_trees % self._num_forests] += 1
         assert tree_counts.sum() == self._num_trees
         tree_counts = map(int, tree_counts)
+        tree_counts[:] = (tree_count for tree_count in tree_counts if tree_count != 0)
         
         logger.debug( "Training parallel vigra RF" )
         # Save for future reference
@@ -64,9 +66,10 @@ class ParallelVigraRfLazyflowClassifierFactory(LazyflowVectorwiseClassifierFacto
             # save the oobs
             req.notify_finished( partial( oobs.__setitem__, i ) )
             pool.add( req )
-        pool.wait()
 
-        logger.info( "Training complete. Average OOB: {}".format( numpy.average(oobs) ) )
+        with Timer() as timer:
+            pool.wait()
+        logger.info( "Training completed in {} seconds. Average OOB: {}".format( timer.seconds(), numpy.average(oobs) ) )
         return ParallelVigraRfLazyflowClassifier( forests, oobs, known_labels, feature_names )
 
     def estimated_ram_usage_per_requested_predictionchannel(self):
@@ -167,7 +170,7 @@ class ParallelVigraRfLazyflowClassifier(LazyflowVectorwiseClassifierABC):
 
         h5py_group = parent_group[name]
         h5py_group['known_labels'] = self._known_labels
-        if self._feature_names != None:
+        if self._feature_names:
             h5py_group['feature_names'] = self._feature_names
         
         # This field is required for all classifiers
