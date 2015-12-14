@@ -47,7 +47,7 @@ class OpTrainClassifierBlocked(Operator):
     Images = InputSlot(level=1)
     Labels = InputSlot(level=1)
     ClassifierFactory = InputSlot()
-    nonzeroLabelBlocks = InputSlot(level=1)
+    nonzeroLabelBlocks = InputSlot(level=1) # Used only in the pixelwise case.
     MaxLabel = InputSlot()
     
     Classifier = OutputSlot()
@@ -62,7 +62,6 @@ class OpTrainClassifierBlocked(Operator):
         self._opVectorwiseTrain.Images.connect( self.Images )
         self._opVectorwiseTrain.Labels.connect( self.Labels )
         self._opVectorwiseTrain.ClassifierFactory.connect( self.ClassifierFactory )
-        self._opVectorwiseTrain.nonzeroLabelBlocks.connect( self.nonzeroLabelBlocks )
         self._opVectorwiseTrain.MaxLabel.connect( self.MaxLabel )
         self._opVectorwiseTrain.progressSignal.subscribe( self.progressSignal )
 
@@ -221,7 +220,6 @@ class OpTrainVectorwiseClassifierBlocked(Operator):
     Images = InputSlot(level=1)
     Labels = InputSlot(level=1)
     ClassifierFactory = InputSlot()
-    nonzeroLabelBlocks = InputSlot(level=1) # TODO: Eliminate this slot. It isn't used any more...
     MaxLabel = InputSlot()
     
     Classifier = OutputSlot()
@@ -237,7 +235,6 @@ class OpTrainVectorwiseClassifierBlocked(Operator):
         self._opFeatureMatrixCaches = OperatorWrapper( OpFeatureMatrixCache, parent=self )
         self._opFeatureMatrixCaches.LabelImage.connect( self.Labels )
         self._opFeatureMatrixCaches.FeatureImage.connect( self.Images )
-        self._opFeatureMatrixCaches.NonZeroLabelBlocks.connect( self.nonzeroLabelBlocks )
         
         self._opConcatenateFeatureMatrices = OpConcatenateFeatureMatrices( parent=self )
         self._opConcatenateFeatureMatrices.FeatureMatrices.connect( self._opFeatureMatrixCaches.LabelAndFeatureMatrix )
@@ -455,9 +452,7 @@ class OpPixelwiseClassifierPredict(Operator):
 
         # Determine how to extract the data from the result (without the halo)
         downstream_roi = numpy.array((roi.start, roi.stop))
-        downstream_channels = self.PMaps.meta.shape[-1]
-        roi_within_result = downstream_roi - upstream_roi[0]
-        roi_within_result[:,-1] = [0, downstream_channels]
+        predictions_roi = downstream_roi[:,:-1] - upstream_roi[0,:-1]
 
         # Request all upstream channels
         input_channels = self.Image.meta.shape[-1]
@@ -466,7 +461,7 @@ class OpPixelwiseClassifierPredict(Operator):
         # Request the data
         input_data = self.Image(*upstream_roi).wait()
         axistags = self.Image.meta.axistags
-        probabilities = classifier.predict_probabilities_pixelwise( input_data, axistags )
+        probabilities = classifier.predict_probabilities_pixelwise( input_data, predictions_roi, axistags )
         
         # We're expecting a channel for each label class.
         # If we didn't provide at least one sample for each label,
@@ -481,11 +476,8 @@ class OpPixelwiseClassifierPredict(Operator):
             
             probabilities = full_probabilities
 
-        # Extract requested region (discard halo)
-        probabilities = probabilities[ roiToSlice(*roi_within_result) ]
-        
         # Copy only the prediction channels the client requested.
-        result[...] = probabilities[...,roi.start[-1]:roi.stop[-1]]
+        result[...] = probabilities[..., roi.start[-1]:roi.stop[-1]]
         return result
 
     def propagateDirty(self, slot, subindex, roi):

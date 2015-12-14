@@ -19,16 +19,20 @@
 # This information is also available on the ilastik web site at:
 #		   http://ilastik.org/license/
 ###############################################################################
+import os
 import httplib
-import socket
 import collections
+import logging
 
 import numpy
 import vigra
 from lazyflow.graph import Operator, OutputSlot
 from lazyflow.roi import determineBlockShape
 
-import pydvid
+from libdvid import DVIDException, ErrMsg
+from libdvid.voxels import VoxelsAccessor
+
+logger = logging.getLogger(__name__)
 
 class OpDvidVolume(Operator):
     Output = OutputSlot()
@@ -58,34 +62,39 @@ class OpDvidVolume(Operator):
         This serves as an alternative init function, from which we are allowed to raise exceptions.
         """
         try:
-            self._connection = pydvid.dvid_connection.DvidConnection( self._hostname, timeout=60.0 )
-            #self._default_accessor = pydvid.voxels.VoxelsAccessor( self._connection, self._uuid, self._dataname, self._query_args )
-            self._default_accessor = pydvid.voxels.VoxelsAccessor( self._connection, self._uuid, self._dataname, self._query_args, retry_timeout=30*60.0 ) # 30 minute retry period
-            self._throttled_accessor = pydvid.voxels.VoxelsAccessor( self._connection, self._uuid, self._dataname, self._query_args,
-                                                                     throttle=True, retry_timeout=30*60.0 ) # 30 minute retry period
-        except pydvid.errors.DvidHttpError as ex:
-            if ex.status_code == httplib.NOT_FOUND:
-                raise OpDvidVolume.DatasetReadError("Host not found: {}".format( self._hostname ))
+            self._default_accessor = VoxelsAccessor( self._hostname, self._uuid, self._dataname, self._query_args )
+            self._throttled_accessor = VoxelsAccessor( self._hostname, self._uuid, self._dataname, self._query_args, throttle=True )
+        except DVIDException as ex:
+            if ex.status == httplib.NOT_FOUND:
+                raise OpDvidVolume.DatasetReadError("DVIDException: " + ex.message)
             raise
-        except socket.error as ex:
-            import errno
-            if ex.errno == errno.ECONNREFUSED:
-                raise OpDvidVolume.DatasetReadError("Connection refused: {}".format( self._hostname ))
-            raise
+        except ErrMsg as ex:
+            raise OpDvidVolume.DatasetReadError("ErrMsg: " + str(ex))
     
     def cleanUp(self):
-        self._connection.close()
+        self._default_accessor = None
+        self._throttled_accessor = None
         super( OpDvidVolume, self ).cleanUp()
     
     def setupOutputs(self):
         shape, dtype, axiskeys = self._default_accessor.shape, self._default_accessor.dtype, self._default_accessor.axiskeys
         
-        # FIXME: For now, we hard-code DVID volumes to have a large (1M cubed) shape.
-        tagged_shape = collections.OrderedDict( zip(axiskeys, shape) )
-        for k,v in tagged_shape.items():
-            if k in 'xyz':
-                tagged_shape[k] = int(1e6)
-        shape = tuple(tagged_shape.values())
+        try:
+            no_extents_checking = bool(int(os.getenv("LAZYFLOW_NO_DVID_EXTENTS", 0)))
+        except ValueError:
+            raise RuntimeError("Didn't understand value for environment variable "\
+                               "LAZYFLOW_NO_DVID_EXTENTS: '{}'.  Please use either 0 or 1."
+                               .format(os.getenv("LAZYFLOW_NO_DVID_EXTENTS")))
+
+        if no_extents_checking or (None in shape):
+            # In headless mode, we allow the users to request regions outside the currently valid regions of the image.
+            # For now, the easiest way to allow that is to simply hard-code DVID volumes to have a really large (1M cubed) shape.
+            logger.info("Using absurdly large DVID volume extents, to allow out-of-bounds requests.")
+            tagged_shape = collections.OrderedDict( zip(axiskeys, shape) )
+            for k,v in tagged_shape.items():
+                if k in 'xyz':
+                    tagged_shape[k] = int(1e6)
+            shape = tuple(tagged_shape.values())
         
         num_channels = shape[0]
         if self._transpose_axes:
@@ -105,6 +114,11 @@ class OpDvidVolume(Operator):
         self.Output.meta.ram_usage_per_requested_pixel = 2 * dtype.type().nbytes * num_channels
 
     def execute(self, slot, subindex, roi, result):
+        if numpy.prod(roi.stop - roi.start) > 1e9:
+            logger.error("Requesting a very large volume from DVID: {}\n"\
+                         "Is that really what you meant to do?"
+                         .format( roi ))
+            
         # TODO: Modify accessor implementation to accept a pre-allocated array.
 
 # FIXME: Disabled throttling for now.  Need a better heuristic or explicit setting.

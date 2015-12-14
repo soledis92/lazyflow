@@ -23,17 +23,21 @@ from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.operators import OpImageReader, OpBlockedArrayCache, OpMetadataInjector, OpSubRegion
 from opStreamingHdf5Reader import OpStreamingHdf5Reader
 from opNpyFileReader import OpNpyFileReader
+from opRawBinaryFileReader import OpRawBinaryFileReader
 from opTiffReader import OpTiffReader
 from opTiffSequenceReader import OpTiffSequenceReader
 from lazyflow.operators.ioOperators import OpStackLoader, OpBlockwiseFilesetReader, OpRESTfulBlockwiseFilesetReader, OpCachedTiledVolumeReader
 from lazyflow.utility.jsonConfig import JsonConfigParser
 from lazyflow.utility.pathHelpers import isUrl
 
+from opStreamingUfmfReader import OpStreamingUfmfReader
+from opStreamingMmfReader import OpStreamingMmfReader
+
 try:
-    from lazyflow.operators.ioOperators import OpDvidVolume
+    from lazyflow.operators.ioOperators import OpDvidVolume, OpDvidRoi
     _supports_dvid = True
 except ImportError as ex:
-    if 'OpDvidVolume' not in ex.args[0]:
+    if 'OpDvidVolume' not in ex.args[0] and 'OpDvidRoi' not in ex.args[0]:
         raise
     _supports_dvid = False
 
@@ -53,13 +57,15 @@ class OpInputDataReader(Operator):
     name = "OpInputDataReader"
     category = "Input"
 
+    videoExts = ['ufmf', 'mmf', 'avi']
     h5Exts = ['h5', 'hdf5', 'ilp']
     npyExts = ['npy']
+    rawExts = ['dat', 'bin', 'raw']
     blockwiseExts = ['json']
     tiledExts = ['json']
     tiffExts = ['tif', 'tiff']
     vigraImpexExts = vigra.impex.listExtensions().split()
-    SupportedExtensions = h5Exts + npyExts + vigraImpexExts + blockwiseExts
+    SupportedExtensions = h5Exts + npyExts + rawExts + vigraImpexExts + blockwiseExts + videoExts
     if _supports_dvid:
         dvidExts = ['dvidvol']
         SupportedExtensions += dvidExts
@@ -125,11 +131,14 @@ class OpInputDataReader(Operator):
         if self._file is not None:
             self._file.close()
 
-        openFuncs = [ self._attemptOpenAsDvidVolume,
+        openFuncs = [ self._attemptOpenAsUfmf,
+                      self._attemptOpenAsMmf,
+                      self._attemptOpenAsDvidVolume,
                       self._attemptOpenAsTiffStack,
                       self._attemptOpenAsStack,
                       self._attemptOpenAsHdf5,
                       self._attemptOpenAsNpy,
+                      self._attemptOpenAsRawBinary,
                       self._attemptOpenAsBlockwiseFileset,
                       self._attemptOpenAsRESTfulBlockwiseFileset,
                       self._attemptOpenAsTiledVolume,
@@ -170,6 +179,50 @@ class OpInputDataReader(Operator):
 
         # Directly connect our own output to the internal output
         self.Output.connect( self.opInjector.Output )
+
+    def _attemptOpenAsMmf(self, filePath):          
+        if '.mmf' in filePath:
+            mmfReader = OpStreamingMmfReader(parent=self)
+            mmfReader.FileName.setValue(filePath)
+
+            return ([mmfReader], mmfReader.Output)
+            
+            '''
+            # Cache the frames we read
+            frameShape = mmfReader.Output.meta.ideal_blockshape
+              
+            mmfCache = OpBlockedArrayCache( parent=self )
+            mmfCache.fixAtCurrent.setValue( False )
+            mmfCache.innerBlockShape.setValue( frameShape )
+            mmfCache.outerBlockShape.setValue( frameShape )
+            mmfCache.Input.connect( mmfReader.Output )
+
+            return ([mmfReader, mmfCache], mmfCache.Output)
+            '''
+        else :
+            return ([], None)
+    
+    def _attemptOpenAsUfmf(self, filePath):          
+        if '.ufmf' in filePath:
+            ufmfReader = OpStreamingUfmfReader(parent=self)
+            ufmfReader.FileName.setValue(filePath)
+            
+            return ([ufmfReader], ufmfReader.Output)
+            
+            # Cache the frames we read
+            '''
+            frameShape = ufmfReader.Output.meta.ideal_blockshape
+            
+            ufmfCache = OpBlockedArrayCache( parent=self )
+            ufmfCache.fixAtCurrent.setValue( False )
+            ufmfCache.innerBlockShape.setValue( frameShape )
+            ufmfCache.outerBlockShape.setValue( frameShape )
+            ufmfCache.Input.connect( ufmfReader.Output )
+             
+            return ([ufmfReader, ufmfCache], ufmfCache.Output)
+            '''
+        else :
+            return ([], None)
     
     def _attemptOpenAsTiffStack(self, filePath):
         if not ('*' in filePath or os.path.pathsep in filePath):
@@ -213,7 +266,7 @@ class OpInputDataReader(Operator):
         try:
             h5File = h5py.File(externalPath, 'r')
         except OpInputDataReader.DatasetReadError:
-            raise
+            raise 
         except Exception as e:
             msg = "Unable to open HDF5 File: {}\n{}".format( externalPath, str(e) )
             raise OpInputDataReader.DatasetReadError( msg )
@@ -290,6 +343,23 @@ class OpInputDataReader(Operator):
             except OpNpyFileReader.DatasetReadError as e:
                 raise OpInputDataReader.DatasetReadError( *e.args )
 
+    def _attemptOpenAsRawBinary(self, filePath):
+        fileExtension = os.path.splitext(filePath)[1].lower()
+        fileExtension = fileExtension.lstrip('.') # Remove leading dot
+
+        # Check for numpy extension
+        if fileExtension not in OpInputDataReader.rawExts:
+            return ([], None)
+        else:
+            try:
+                # Create an internal operator
+                opReader = OpRawBinaryFileReader(parent=self)
+                opReader.FilePath.setValue(filePath)
+                return ([opReader], opReader.Output)
+            except OpRawBinaryFileReader.DatasetReadError as e:
+                raise OpInputDataReader.DatasetReadError( *e.args )
+
+
     def _attemptOpenAsDvidVolume(self, filePath):
         """
         Two ways to specify a dvid volume.
@@ -302,24 +372,36 @@ class OpInputDataReader(Operator):
                 hostname, uuid, dataname = filetext.splitlines()
             opDvidVolume = OpDvidVolume( hostname, uuid, dataname, transpose_axes=True, parent=self )
             return [opDvidVolume], opDvidVolume.Output
-        if '://' in filePath:
-            url_format = "^protocol://hostname/api/node/uuid/dataname(\\?query_string)?"
-            for field in ['protocol', 'hostname', 'uuid', 'dataname', 'query_string']:
-                url_format = url_format.replace( field, '(?P<' + field + '>[^?]+)' )
-            match = re.match( url_format, filePath )
-            if match:
-                fields = match.groupdict()
-                try:
-                    query_string = fields['query_string']
-                    query_args = {}
-                    if query_string:
-                        query_args = dict( map(lambda s: s.split('='), query_string.split('&')) )
-                    opDvidVolume = OpDvidVolume( fields['hostname'], fields['uuid'], fields['dataname'], query_args,
-                                                 transpose_axes=True, parent=self )
-                    return [opDvidVolume], opDvidVolume.Output
-                except OpDvidVolume.DatasetReadError as e:
-                    raise OpInputDataReader.DatasetReadError( *e.args )
-        return ([], None)
+        
+        if '://' not in filePath:
+            return ([], None) # not a url
+
+        url_format = "^protocol://hostname/api/node/uuid/dataname(\\?query_string)?"
+        for field in ['protocol', 'hostname', 'uuid', 'dataname', 'query_string']:
+            url_format = url_format.replace( field, '(?P<' + field + '>[^?]+)' )
+        match = re.match( url_format, filePath )
+        if not match:
+            # DVID is the only url-based format we support right now.
+            # So if it looks like the user gave a URL that isn't a valid DVID node, then error.
+            raise OpInputDataReader.DatasetReadError("Invalid URL format for DVID: {}".format(filePath))
+
+        fields = match.groupdict()
+        try:
+            query_string = fields['query_string']
+            query_args = {}
+            if query_string:
+                query_args = dict( map(lambda s: s.split('='), query_string.split('&')) )
+            try:
+                opDvidVolume = OpDvidVolume( fields['hostname'], fields['uuid'], fields['dataname'], query_args,
+                                             transpose_axes=True, parent=self )
+                return [opDvidVolume], opDvidVolume.Output
+            except:
+                # Maybe this is actually a roi
+                opDvidRoi = OpDvidRoi( fields['hostname'], fields['uuid'], fields['dataname'],
+                                             transpose_axes=True, parent=self )
+                return [opDvidRoi], opDvidRoi.Output
+        except OpDvidVolume.DatasetReadError as e:
+            raise OpInputDataReader.DatasetReadError( *e.args )
 
     def _attemptOpenAsBlockwiseFileset(self, filePath):
         fileExtension = os.path.splitext(filePath)[1].lower()

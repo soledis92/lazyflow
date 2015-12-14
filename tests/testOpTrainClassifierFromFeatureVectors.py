@@ -24,7 +24,6 @@ class TestOpTrainClassifierFromFeatureVectors(object):
         opFeatureMatrixCache = OpFeatureMatrixCache(graph=graph)
         opFeatureMatrixCache.FeatureImage.setValue(features)
         opFeatureMatrixCache.LabelImage.setValue(labels)
-        opFeatureMatrixCache.NonZeroLabelBlocks.setValue(0)
         
         opFeatureMatrixCache.LabelImage.setDirty( numpy.s_[10:11, 10:12] )
         opFeatureMatrixCache.LabelImage.setDirty( numpy.s_[20:21, 20:22] )
@@ -37,11 +36,11 @@ class TestOpTrainClassifierFromFeatureVectors(object):
         
         assert opTrain.Classifier.ready()
         
-        trained_classifer = opTrain.Classifier.value
+        trained_classifier = opTrain.Classifier.value
         
         # This isn't much of a test at the moment...
-        assert isinstance( trained_classifer, ParallelVigraRfLazyflowClassifier ), \
-            "classifier is of the wrong type: {}".format(type(trained_classifer))
+        assert isinstance( trained_classifier, ParallelVigraRfLazyflowClassifier ), \
+            "classifier is of the wrong type: {}".format(type(trained_classifier))
 
 if __name__ == "__main__":
     import sys

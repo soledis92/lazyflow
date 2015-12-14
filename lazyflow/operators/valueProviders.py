@@ -121,8 +121,9 @@ class OpMetadataInjector(Operator):
         return result
 
     def propagateDirty(self, slot, subindex, roi):
-        # Forward to the output slot
-        self.Output.setDirty(roi)
+        if slot is self.Input:
+            # Forward to the output slot
+            self.Output.setDirty(roi)
 
 class OpMetadataSelector(Operator):
     name = "OpMetadataSelector"
@@ -295,12 +296,20 @@ class OpValueCache(Operator, ObservableCache):
                     #  and that other thread cancelled it before we got a chance to call wait().
                     # Just regenerate the request and try again...
                     with self._lock:
-                        if request == self._request:
+                        if request == self._request or self._request is None:
                             request = self.Input[...]
                             self._request = request
                         else:
                             request = self._request
                     state = State.Dirty
+                except Request.CancellationException:
+                    if state == State.Dirty:
+                        with self._lock:
+                            # If no other request has 'taken responsibility' since we were cancelled
+                            # (i.e. self._request is still the request that raised this exception.)
+                            if request == self._request:
+                                self._request = None # This is mostly to aid testing.
+                    raise
         
         result[...] = value
         

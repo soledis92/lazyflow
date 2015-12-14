@@ -245,7 +245,6 @@ class TestOpValueCache(object):
 
 
         req = opCache.Output[:].wait()
-        assert opCache._dirty == False
         assert opCache._request is None
         assert opCache.Output.value == 100
 
@@ -292,9 +291,6 @@ class TestOpZeroDefault(object):
 #    handler = logging.StreamHandler()
 #    handler.setLevel(logging.DEBUG)
 #    traceLogger.addHandler(handler)
-
-#    import nose
-#    ret = nose.run(defaultTest=__file__, env={'NOSE_NOCAPTURE' : 1})
 
 if __name__ == "__main__":
     import sys

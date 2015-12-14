@@ -53,9 +53,7 @@ class OpUnblockedArrayCache(Operator, ManagedBlockedCache):
     def __init__(self, *args, **kwargs):
         super( OpUnblockedArrayCache, self ).__init__(*args, **kwargs)
         self._lock = RequestLock()
-        self._block_data = {}
-        self._block_locks = {}
-        self._last_access_times = collections.defaultdict(float)
+        self._resetBlocks()
 
         # Now that we're initialized, it's safe to register with the memory manager
         self.registerWithMemoryManager()
@@ -121,19 +119,16 @@ class OpUnblockedArrayCache(Operator, ManagedBlockedCache):
         maximum_roi = roiFromShape(self.Input.meta.shape)
         maximum_roi = self._standardize_roi( *maximum_roi )
         
-        with self._lock:
-            if dirty_roi == maximum_roi:
-                # Optimize the common case:
-                # Everything is dirty, so no need to loop
-                self._block_data = {}
-                self._block_locks = {}
-            else:
-                # FIXME: This is O(N) for now.
-                #        We should speed this up by maintaining a bookkeeping data structure in execute().
-                for block_roi in self._block_data.keys():
-                    if getIntersection(block_roi, dirty_roi, assertIntersect=False):
-                        del self._block_data[block_roi]
-                        del self._block_locks[block_roi]
+        if dirty_roi == maximum_roi:
+            # Optimize the common case:
+            # Everything is dirty, so no need to loop
+            self._resetBlocks()
+        else:
+            # FIXME: This is O(N) for now.
+            #        We should speed this up by maintaining a bookkeeping data structure in execute().
+            for block_roi in self._block_data.keys():
+                if getIntersection(block_roi, dirty_roi, assertIntersect=False):
+                    self.freeBlock(block_roi)
 
         self.Output.setDirty( roi.start, roi.stop )
 
@@ -164,15 +159,16 @@ class OpUnblockedArrayCache(Operator, ManagedBlockedCache):
         return super(OpUnblockedArrayCache, self).lastAccessTime()
 
     def getBlockAccessTimes(self):
-        l = [(k, self._last_access_times[k])
-             for k in self._last_access_times]
+        with self._lock:
+            # needs to be locked because dicts must not change size
+            # during iteration
+            l = [(k, self._last_access_times[k])
+                 for k in self._last_access_times]
         return l
 
     def freeMemory(self):
         used = self.usedMemory()
-        with self._lock:
-            self._block_data = {}
-            self._block_locks = {}
+        self._resetBlocks()
         return used
 
     def freeBlock(self, key):
@@ -184,7 +180,14 @@ class OpUnblockedArrayCache(Operator, ManagedBlockedCache):
             mem = block.size * bytes_per_pixel
             del self._block_data[key]
             del self._block_locks[key]
+            del self._last_access_times[key]
             return mem
 
     def freeDirtyMemory(self):
         return 0.0
+
+    def _resetBlocks(self):
+        with self._lock:
+            self._block_data = {}
+            self._block_locks = {}
+            self._last_access_times = collections.defaultdict(float)

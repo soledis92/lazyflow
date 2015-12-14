@@ -36,10 +36,6 @@ from lazyflow.utility.testing import OpArrayPiperWithAccessCount
 from lazyflow.operators.cacheMemoryManager import CacheMemoryManager
 
 
-# This test suite works for the old and new implementations of OpBlockedArrayCache
-from lazyflow.operators.opRefactoredBlockedArrayCache import OpRefactoredBlockedArrayCache
-OpBlockedArrayCache = OpRefactoredBlockedArrayCache
-
 #from lazyflow.request import Request
 #Request.reset_thread_pool(0)
 
@@ -386,6 +382,35 @@ class TestOpBlockedArrayCache(unittest.TestCase):
         opProvider.Input.setDirty(dirty_key)
         opCache.Output(req_key).wait()
         assert opProvider.accessCount == 1
+
+    def testBypassMode(self):
+        opCache = self.opCache
+        opProvider = self.opProvider        
+        
+        # Activate "bypass mode", which just disables the cache entirely.
+        # No block scheme, no data copying, no 'fixAtCurrent'
+        opCache.BypassModeEnabled.setValue(True)
+
+        # We can set 'fixAtCurrent', but it makes no difference.        
+        opCache.fixAtCurrent.setValue(True)
+
+        
+        expectedAccessCount = 0
+        assert opProvider.accessCount == expectedAccessCount, "Access count={}, expected={}".format(opProvider.accessCount, expectedAccessCount)
+
+        # Not block-aligned request -- in bypass mode, blocking is ignored
+        slicing = make_key[0:1, 35:45, 10:20, 0:10, 0:1]
+        data = opCache.Output( slicing ).wait()
+        data = data.view(vigra.VigraArray)
+        data.axistags = opCache.Output.meta.axistags
+        expectedAccessCount += 1
+        assert (data == self.data[slicing]).all()
+        assert opProvider.accessCount == expectedAccessCount, "Access count={}, expected={}".format(opProvider.accessCount, expectedAccessCount)
+
+        # In bypass mode, the data wasn't cached, so the data is simply requested a second time.
+        data = opCache.Output( slicing ).wait()
+        expectedAccessCount += 1
+        assert opProvider.accessCount == expectedAccessCount, "Access count={}, expected={}".format(opProvider.accessCount, expectedAccessCount)
 
 class TestOpBlockedArrayCache_masked(object):
 
