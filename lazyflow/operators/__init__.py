@@ -59,7 +59,6 @@ except:
     from opObjectFeatures import OpObjectFeatures
     from opCompressedCache import OpCompressedCache
     from opCompressedUserLabelArray import OpCompressedUserLabelArray
-    from opCompressedUserCropArray import OpCompressedUserCropArray
     from opLabelImage import OpLabelImage
     from opCachedLabelImage import OpCachedLabelImage
     from opInterpMissingData import OpInterpMissingData
