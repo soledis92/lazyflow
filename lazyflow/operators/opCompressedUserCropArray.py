@@ -29,12 +29,12 @@ import numpy
 # Lazyflow
 from lazyflow.graph import Operator, InputSlot, OutputSlot
 from lazyflow.roi import TinyVector, getIntersectingBlocks, getBlockBounds, roiToSlice, getIntersection, roiFromShape
-from lazyflow.operators.opCompressedCache import OpCompressedCache
+from lazyflow.operators.opCompressedCache import OpUnmanagedCompressedCache
 from lazyflow.rtype import SubRegion
 
 logger = logging.getLogger(__name__)
 
-class OpCompressedUserCropArray(OpCompressedCache):
+class OpCompressedUserCropArray(OpUnmanagedCompressedCache):
     """
     A subclass of OpCompressedCache that is suitable for storing user-drawn crop pixels.
     Note that setInSlot has special functionality (only non-zero pixels are written, and there is also an "eraser" pixel value).
@@ -52,8 +52,8 @@ class OpCompressedUserCropArray(OpCompressedCache):
     #nonzeroCoordinates = OutputSlot()
     nonzeroBlocks = OutputSlot()
     #maxCrop = OutputSlot()
-    
-    Projection2D = OutputSlot() # A somewhat magic output that returns a projection of all 
+
+    Projection2D = OutputSlot() # A somewhat magic output that returns a projection of all
                                 # crop data underneath a given roi, from all slices.
                                 # If, for example, a 256x1x256 tile is requested from this slot,
                                 # It will return a projection of ALL crops that fall within the 256 x ... x 256 tile.
@@ -186,7 +186,7 @@ class OpCompressedUserCropArray(OpCompressedCache):
 
     def _executeProjection2D(self, roi, destination):
         assert sum(TinyVector(destination.shape) > 1) <= 2, "Projection result must be exactly 2D"
-        
+
         # First, we have to determine which axis we are projecting along.
         # We infer this from the shape of the roi.
         # For example, if the roi is of shape 
